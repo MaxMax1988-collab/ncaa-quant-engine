@@ -93,14 +93,17 @@ def init_ncaa_db():
 
 db_conn = init_ncaa_db()
 
-# --- POBIERANIE STATYSTYK Z CFBD API (QUERY PARAM + CACHE BUSTER) ---
-@st.cache_data(ttl=300, show_spinner=False)
+# --- POBIERANIE STATYSTYK Z CFBD API (OFICJALNY NAGŁÓWEK BEARER) ---
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_cfbd_stats():
     url = "https://api.collegefootballdata.com/teams/fbs"
-    params = {"apiKey": CFBD_API_KEY, "_cb": datetime.now().timestamp()}
+    headers = {
+        "Authorization": f"Bearer {CFBD_API_KEY}",
+        "accept": "application/json"
+    }
     stats_dict = {}
     try:
-        res = requests.get(url, params=params, timeout=10)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
             for team in res.json():
                 name = team.get("school", "")
