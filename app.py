@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 import sqlite3
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from rapidfuzz import process, fuzz
 
 # --- KONFIGURACJA STRONY ---
@@ -30,6 +30,14 @@ ODDS_API_KEY = "3e81b37bac9bb7efbe8d2cf68065b6dc"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 CFBD_API_KEY = "Bu754KagVf9KUyZiMidj/5Zbi0ykn4CL16hS04SccbuUk2If+H4RLvGXssgGZ"
 
+# Asekuracyjna lista głównych drużyn FBS NCAA w przypadku problemów z limitem API
+STATIC_FBS_FALLBACK = [
+    "Alabama", "Georgia", "Ohio State", "Michigan", "Texas", "Notre Dame", "Oregon",
+    "Penn State", "USC", "LSU", "Clemson", "Oklahoma", "Florida State", "Tennessee",
+    "Miami", "Ole Miss", "Utah", "Washington", "Texas A&M", "Wisconsin", "Iowa",
+    "Michigan State", "Northwestern", "Kansas State", "Kansas", "Stanford", "Elon"
+]
+
 # --- HYBRYDOWY SŁOWNIK ALIASÓW ---
 TEAM_ALIAS_MAP = {
     "Alabama Crimson Tide": "Alabama",
@@ -42,7 +50,7 @@ TEAM_ALIAS_MAP = {
     "Penn State Nittany Lions": "Penn State"
 }
 
-def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=70):
+def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=65):
     if not team_name_from_odds:
         return "Unknown"
     if team_name_from_odds in TEAM_ALIAS_MAP:
@@ -50,12 +58,14 @@ def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=70)
     if not stats_team_list:
         return team_name_from_odds
 
-    best_match, score, _ = process.extractOne(
+    match_res = process.extractOne(
         team_name_from_odds, 
         stats_team_list, 
         scorer=fuzz.WRatio
     )
-    return best_match if score >= threshold else team_name_from_odds
+    if match_res and match_res[1] >= threshold:
+        return match_res[0]
+    return team_name_from_odds
 
 # --- BAZA DANYCH SQLITE ---
 def init_ncaa_db():
@@ -83,52 +93,33 @@ def init_ncaa_db():
 
 db_conn = init_ncaa_db()
 
-# --- POBIERANIE STATYSTYK Z CFBD API (MULTI-AUTH FALLBACK) ---
-@st.cache_data(ttl=3600, show_spinner=False)
+# --- POBIERANIE STATYSTYK Z CFBD API (PRAWIDŁOWA AUTORYZACJA BEARER) ---
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_cfbd_stats():
     url = "https://api.collegefootballdata.com/teams/fbs"
+    headers = {
+        "Authorization": f"Bearer {CFBD_API_KEY}",
+        "accept": "application/json"
+    }
     stats_dict = {}
-    
-    # 1. Próba Bearer
     try:
-        res = requests.get(url, headers={"Authorization": f"Bearer {CFBD_API_KEY}", "accept": "application/json"}, timeout=10)
+        res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
             for team in res.json():
                 name = team.get("school", "")
                 if name:
-                    stats_dict[name] = {"active": True}
-            if stats_dict:
-                return stats_dict
-    except Exception:
-        pass
+                    stats_dict[name] = {"active": True, "source": "API"}
+            return stats_dict, f"✅ OK (Połączono z API: {len(stats_dict)} drużyn FBS)"
+        else:
+            for t in STATIC_FBS_FALLBACK:
+                stats_dict[t] = {"active": True, "source": "Fallback"}
+            return stats_dict, f"⚠️ HTTP {res.status_code} (Użyto bazy awaryjnej: {len(stats_dict)} drużyn)"
+    except Exception as e:
+        for t in STATIC_FBS_FALLBACK:
+            stats_dict[t] = {"active": True, "source": "Fallback"}
+        return stats_dict, f"⚠️ Błąd sieci (Użyto bazy awaryjnej: {len(stats_dict)} drużyn)"
 
-    # 2. Próba ApiKey
-    try:
-        res = requests.get(url, headers={"Authorization": f"ApiKey {CFBD_API_KEY}", "accept": "application/json"}, timeout=10)
-        if res.status_code == 200:
-            for team in res.json():
-                name = team.get("school", "")
-                if name:
-                    stats_dict[name] = {"active": True}
-            if stats_dict:
-                return stats_dict
-    except Exception:
-        pass
-
-    # 3. Próba z parametrem w zapytaniu
-    try:
-        res = requests.get(url, params={"apiKey": CFBD_API_KEY}, timeout=10)
-        if res.status_code == 200:
-            for team in res.json():
-                name = team.get("school", "")
-                if name:
-                    stats_dict[name] = {"active": True}
-    except Exception:
-        pass
-        
-    return stats_dict
-
-cfbd_stats_cache = fetch_cfbd_stats()
+cfbd_stats_cache, cfbd_status_msg = fetch_cfbd_stats()
 available_cfbd_teams = list(cfbd_stats_cache.keys())
 
 # --- PANEL BOCZNY ---
@@ -148,7 +139,7 @@ with st.sidebar:
     st.metric("Monitorowane zakłady NCAA", total_tracked)
 
 # --- POBIERANIE I FILTROWANIE KURSÓW Z THE ODDS API ---
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_ncaa_odds():
     url = f"{ODDS_BASE_URL}/americanfootball_ncaaf/odds"
     params = {"apiKey": ODDS_API_KEY, "regions": "us,eu", "markets": "h2h", "oddsFormat": "decimal"}
@@ -211,8 +202,8 @@ for m in raw_matches:
     implied_h = prob_raw_h / tot_v
     implied_a = prob_raw_a / tot_v
     
-    h_weight = 1.02 if m['home'] in cfbd_stats_cache else 0.98
-    a_weight = 1.02 if m['away'] in cfbd_stats_cache else 0.98
+    h_weight = 1.01 if m['home'] in cfbd_stats_cache else 0.99
+    a_weight = 1.01 if m['away'] in cfbd_stats_cache else 0.99
     
     ai_prob_home = implied_h * h_weight
     ai_prob_home = np.clip(ai_prob_home / (ai_prob_home + (implied_a * a_weight)), 0.05, 0.95)
@@ -294,14 +285,13 @@ with tab1:
 with tab2:
     st.subheader("🛡️ Terminal Diagnostyczny NCAA")
     test_api_status = f"✅ OK (Pobrano i przeanalizowano meczów: {len(raw_matches)})" if raw_matches else "❌ Brak danych"
-    cfbd_status = f"✅ OK (Baza CFBD połączona: {len(cfbd_stats_cache)} drużyn FBS)" if cfbd_stats_cache else "❌ Brak odpowiedzi z CFBD API"
     
     st.markdown(f"""
         <div class="test-box">
         <b>[TEST 1] Zewnętrzne API Kursów NCAA (The Odds API):</b><br>
         Status: {test_api_status}<br><br>
-        <b>[TEST 2] Zewnętrzne API Statystyk (College Football Data):</b><br>
-        Status: {cfbd_status}
+        <b>[TEST 2] Baza Statystyk NCAA (CFBD API):</b><br>
+        Status: {cfbd_status_msg}
         </div>
     """, unsafe_allow_html=True)
 
@@ -312,4 +302,4 @@ with tab3:
         st.info("Brak zapisanych zakładów NCAA.")
     else: 
         st.dataframe(df_bets, use_container_width=True)
-                
+        
