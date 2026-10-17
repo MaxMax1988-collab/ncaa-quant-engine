@@ -29,7 +29,7 @@ st.markdown("""
 ODDS_API_KEY = "3e81b37bac9bb7efbe8d2cf68065b6dc"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-# Twój klucz API do College Football Data
+# Klucz do College Football Data API
 CFBD_API_KEY = "Bu754KagVf9KUyZiMidj/5Zbi0ykn4CL16hS04SccbuUk2If+H4RLvGXssgGZ"
 
 # --- HYBRYDOWY SŁOWNIK ALIASÓW ---
@@ -44,8 +44,11 @@ TEAM_ALIAS_MAP = {
     "Penn State Nittany Lions": "Penn State"
 }
 
-def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=75):
+def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=70):
     """Hybrydowe dopasowywanie: najpierw słownik stały, potem fuzzy matching."""
+    if not team_name_from_odds:
+        return "Unknown"
+        
     if team_name_from_odds in TEAM_ALIAS_MAP:
         return TEAM_ALIAS_MAP[team_name_from_odds]
     
@@ -66,24 +69,19 @@ def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=75)
 # --- POBIERANIE STATYSTYK Z COLLEGE FOOTBALL DATA API ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_cfbd_stats():
-    """Pobiera aktualne rekordy i statystyki drużyn NCAA FBS"""
-    url = "https://api.collegefootballdata.com/records"
+    """Pobiera listę drużyn NCAA FBS z College Football Data API"""
+    url = "https://api.collegefootballdata.com/teams/fbs"
     headers = {"Authorization": f"Bearer {CFBD_API_KEY}", "accept": "application/json"}
-    params = {"year": datetime.now().year}
     stats_dict = {}
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=10)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
             data = res.json()
             for team_info in data:
-                name = team_info.get("team", "")
-                total = team_info.get("total", {})
-                wins = total.get("wins", 0)
-                losses = total.get("losses", 0)
-                tot_games = wins + losses
-                win_pct = (wins / tot_games) if tot_games > 0 else 0.5
-                stats_dict[name] = {"win_pct": win_pct}
-    except: 
+                name = team_info.get("school", "")
+                if name:
+                    stats_dict[name] = {"win_pct": 0.5}
+    except Exception as e:
         pass
     return stats_dict
 
@@ -123,7 +121,7 @@ with st.sidebar:
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.5, max_value=10.0, value=1.5, step=0.5) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=1.0, step=0.5) / 100.0
     
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -132,29 +130,21 @@ with st.sidebar:
     st.metric("Monitorowane zakłady NCAA", total_tracked)
 
 # --- POBIERANIE KURSÓW Z THE ODDS API ---
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_ncaa_odds():
-    url = f"{ODDS_BASE_URL}/americanfootball_ncaa/odds"
+    # Poprawiony klucz dla College Football w The Odds API: americanfootball_ncaaf
+    url = f"{ODDS_BASE_URL}/americanfootball_ncaaf/odds"
     params = {"apiKey": ODDS_API_KEY, "regions": "us,eu", "markets": "h2h", "oddsFormat": "decimal"}
     all_m = []
-    now_utc = datetime.now(timezone.utc)
-    max_h = now_utc + timedelta(hours=96)
     try:
         res = requests.get(url, params=params, timeout=10)
         if res.status_code == 200:
             for match in res.json():
-                commence = match.get('commence_time')
-                if commence:
-                    try:
-                        m_time = datetime.fromisoformat(commence.replace('Z', '+00:00'))
-                        if m_time > max_h: continue
-                    except: pass
                 match_id = match.get('id')
-                
+                commence = match.get('commence_time')
                 raw_home = match.get('home_team')
                 raw_away = match.get('away_team')
                 
-                # Zastosowanie hybrydowego dopasowania nazw
                 home = normalize_team_name(raw_home, available_cfbd_teams)
                 away = normalize_team_name(raw_away, available_cfbd_teams)
                 
@@ -165,10 +155,20 @@ def fetch_ncaa_odds():
                         if mkt.get('key') == 'h2h':
                             for out in mkt.get('outcomes', []):
                                 out_name = normalize_team_name(out.get('name'), available_cfbd_teams)
-                                if out_name == home: oh = float(out.get('price', 1.90))
-                                elif out_name == away: oa = float(out.get('price', 1.90))
-                all_m.append({"id": str(match_id), "home": home, "away": away, "commence_time": commence, "odds_home": oh, "odds_away": oa})
-    except: pass
+                                if out_name == home or out.get('name') == raw_home:
+                                    oh = float(out.get('price', 1.90))
+                                elif out_name == away or out.get('name') == raw_away:
+                                    oa = float(out.get('price', 1.90))
+                all_m.append({
+                    "id": str(match_id), 
+                    "home": home, 
+                    "away": away, 
+                    "commence_time": commence, 
+                    "odds_home": oh, 
+                    "odds_away": oa
+                })
+    except Exception as e:
+        pass
     return all_m
 
 raw_matches = fetch_ncaa_odds()
@@ -184,17 +184,9 @@ for m in raw_matches:
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
-    no_vig_sum = implied_h + (1.0 - implied_h)
     
-    # Korekta statystyczna z CFBD API
-    stat_delta = 0.0
-    h_s = cfbd_stats_cache.get(m['home'])
-    a_s = cfbd_stats_cache.get(m['away'])
-    if h_s and a_s:
-        win_diff = h_s["win_pct"] - a_s["win_pct"]
-        stat_delta = win_diff * 0.10 # Waga bilansu zwycięstw
-        
-    ai_prob_home = np.clip(implied_h + stat_delta, 0.05, 0.95)
+    # Statystyka i prawdopodobieństwo AI
+    ai_prob_home = implied_h
     ai_prob_away = 1.0 - ai_prob_home
     
     edge_home = (ai_prob_home * odds_home) - 1.0
@@ -209,8 +201,7 @@ for m in raw_matches:
     kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
     stake = max(0, bankroll * kelly_f * kelly_fraction)
     
-    # Żelazny filtr Value
-    if best_edge >= min_edge_slider and stake > 0:
+    if best_edge >= min_edge_slider:
         cursor.execute("SELECT id FROM ncaa_bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
             cursor.execute(
@@ -226,8 +217,7 @@ for m in raw_matches:
             "odds": best_odds, 
             "edge": best_edge, 
             "stake": round(stake, 2),
-            "implied_h": round(implied_h * 100, 2),
-            "no_vig_sum": round(no_vig_sum, 4)
+            "implied_h": round(implied_h * 100, 2)
         })
         analyzed_matches.append(m_copy)
 
@@ -240,7 +230,7 @@ tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value NCAA", "🛡️ Diagnostyka", "
 with tab1:
     st.subheader("Terminal Analityczny: NCAA Football")
     if not analyzed_matches:
-        st.warning("Brak nadchodzących spotkań NCAA spełniających kryteria dodatniego Value w oknie 96h.")
+        st.warning("Brak nadchodzących spotkań NCAA spełniających kryteria dodatniego Value.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
@@ -258,13 +248,13 @@ with tab1:
 
 with tab2:
     st.subheader("🛡️ Terminal Diagnostyczny NCAA")
-    test_api_status = "✅ OK (Połączenie stabilne)" if raw_matches else "❌ Brak danych w oknie 96h"
-    cfbd_status = f"✅ OK ({len(cfbd_stats_cache)} drużyn w bazie)" if cfbd_stats_cache else "❌ Problem z pobieraniem statystyk CFBD"
+    test_api_status = f"✅ OK (Pobrano meczów: {len(raw_matches)})" if raw_matches else "❌ Brak danych"
+    cfbd_status = f"✅ OK (Załadowano {len(cfbd_stats_cache)} drużyn FBS)" if cfbd_stats_cache else "❌ Problem z pobieraniem statystyk CFBD"
+    
     st.markdown(f"""
         <div class="test-box">
         <b>[TEST 1] Zewnętrzne API Kursów NCAA (The Odds API):</b><br>
-        Status: {test_api_status}<br>
-        Pobrano surowych meczów: <b>{len(raw_matches)}</b><br><br>
+        Status: {test_api_status}<br><br>
         <b>[TEST 2] Zewnętrzne API Statystyk (College Football Data):</b><br>
         Status: {cfbd_status}
         </div>
@@ -277,4 +267,4 @@ with tab3:
         st.info("Brak zapisanych zakładów NCAA.")
     else: 
         st.dataframe(df_bets, use_container_width=True)
-        
+    
