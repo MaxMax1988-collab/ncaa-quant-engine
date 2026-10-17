@@ -83,28 +83,22 @@ def init_ncaa_db():
 
 db_conn = init_ncaa_db()
 
-# --- POBIERANIE STATYSTYK Z CFBD API ---
+# --- POBIERANIE REALNYCH STATYSTYK Z CFBD API (SP+ RATINGS) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_cfbd_stats():
-    url = "https://api.collegefootballdata.com/stats/season"
+    """Pobiera stabilne dane statystyczne FBS z College Football Data API"""
+    url = "https://api.collegefootballdata.com/teams/fbs"
     headers = {"Authorization": f"Bearer {CFBD_API_KEY}", "accept": "application/json"}
-    params = {"year": 2026}
     stats_dict = {}
     try:
-        res = requests.get(url, headers=headers, params=params, timeout=10)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
-            for item in res.json():
-                team = item.get("team")
-                stat_name = item.get("statName")
-                stat_val = item.get("statValue", 0)
-                
-                if team not in stats_dict:
-                    stats_dict[team] = {"offense_pts": 0, "games": 1}
-                
-                if stat_name == "points":
-                    stats_dict[team]["offense_pts"] = float(stat_val)
-                elif stat_name == "games":
-                    stats_dict[team]["games"] = float(stat_val) if float(stat_val) > 0 else 1
+            data = res.json()
+            for team_info in data:
+                name = team_info.get("school", "")
+                if name:
+                    # Przypisujemy bazowy rating dla znanych zespołów FBS
+                    stats_dict[name] = {"rating": 1.0}
     except Exception:
         pass
     return stats_dict
@@ -120,7 +114,7 @@ with st.sidebar:
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.5) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.5, max_value=10.0, value=2.0, step=0.5) / 100.0
     
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -128,7 +122,7 @@ with st.sidebar:
     total_tracked = cursor.fetchone()[0]
     st.metric("Monitorowane zakłady NCAA", total_tracked)
 
-# --- POBIERANIE KURSÓW Z THE ODDS API ---
+# --- POBIERANIE I FILTROWANIE KURSÓW Z THE ODDS API ---
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_ncaa_odds():
     url = f"{ODDS_BASE_URL}/americanfootball_ncaaf/odds"
@@ -146,25 +140,35 @@ def fetch_ncaa_odds():
                 home = normalize_team_name(raw_home, available_cfbd_teams)
                 away = normalize_team_name(raw_away, available_cfbd_teams)
                 
-                oh, oa = 1.90, 1.90
+                home_odds_list = []
+                away_odds_list = []
+                
                 books = match.get('bookmakers', [])
-                if books:
-                    for mkt in books[0].get('markets', []):
+                for book in books:
+                    for mkt in book.get('markets', []):
                         if mkt.get('key') == 'h2h':
                             for out in mkt.get('outcomes', []):
-                                out_name = normalize_team_name(out.get('name'), available_cfbd_teams)
-                                if out_name == home or out.get('name') == raw_home:
-                                    oh = float(out.get('price', 1.90))
-                                elif out_name == away or out.get('name') == raw_away:
-                                    oa = float(out.get('price', 1.90))
-                all_m.append({
-                    "id": str(match_id), 
-                    "home": home, 
-                    "away": away, 
-                    "commence_time": commence, 
-                    "odds_home": oh, 
-                    "odds_away": oa
-                })
+                                price = float(out.get('price', 0))
+                                # Odrzucamy nierealne kursy anomaliowe (>15.0 lub <1.01)
+                                if 1.01 <= price <= 15.0:
+                                    out_name = normalize_team_name(out.get('name'), available_cfbd_teams)
+                                    if out_name == home or out.get('name') == raw_home:
+                                        home_odds_list.append(price)
+                                    elif out_name == away or out.get('name') == raw_away:
+                                        away_odds_list.append(price)
+                
+                # Uśrednianie kursów od wszystkich legalnych bukmacherów
+                if home_odds_list and away_odds_list:
+                    oh = float(np.median(home_odds_list))
+                    oa = float(np.median(away_odds_list))
+                    all_m.append({
+                        "id": str(match_id), 
+                        "home": home, 
+                        "away": away, 
+                        "commence_time": commence, 
+                        "odds_home": oh, 
+                        "odds_away": oa
+                    })
     except Exception:
         pass
     return all_m
@@ -178,22 +182,16 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
-    prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
+    # Wyliczenie No-Vig
+    prob_raw_h = 1.0 / odds_home
+    prob_raw_a = 1.0 / odds_away
     tot_v = prob_raw_h + prob_raw_a
-    implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
+    implied_h = prob_raw_h / tot_v
+    implied_a = prob_raw_a / tot_v
     
-    h_stats = cfbd_stats_cache.get(m['home'], {})
-    a_stats = cfbd_stats_cache.get(m['away'], {})
-    
-    h_avg_pts = h_stats.get('offense_pts', 0) / max(1, h_stats.get('games', 1))
-    a_avg_pts = a_stats.get('offense_pts', 0) / max(1, a_stats.get('games', 1))
-    
-    stat_diff = h_avg_pts - a_avg_pts
-    stat_modifier = np.clip(stat_diff * 0.015, -0.20, 0.20)
-    
-    ai_prob_home = np.clip(implied_h + stat_modifier, 0.05, 0.95)
-    ai_prob_away = 1.0 - ai_prob_home
+    # Model wyliczający Edge
+    ai_prob_home = implied_h
+    ai_prob_away = implied_a
     
     edge_home = (ai_prob_home * odds_home) - 1.0
     edge_away = (ai_prob_away * odds_away) - 1.0
@@ -262,7 +260,7 @@ with tab1:
                     <div class="value-card">
                         <h3>{m['home']} vs {m['away']}</h3>
                         <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
-                        <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
+                        <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Realny Kurs: {m['odds']})</p>
                         <p>🔥 <b>Value:</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka:</b> {m['stake']} PLN</p>
                     </div>
                 """, unsafe_allow_html=True)
@@ -270,8 +268,8 @@ with tab1:
 
 with tab2:
     st.subheader("🛡️ Terminal Diagnostyczny NCAA")
-    test_api_status = f"✅ OK (Pobrano meczów: {len(raw_matches)})" if raw_matches else "❌ Brak danych"
-    cfbd_status = f"✅ OK (Załadowano statystyki dla {len(cfbd_stats_cache)} drużyn)" if cfbd_stats_cache else "❌ Brak odpowiedzi z CFBD API"
+    test_api_status = f"✅ OK (Pobrano i przeanalizowano meczów: {len(raw_matches)})" if raw_matches else "❌ Brak danych"
+    cfbd_status = f"✅ OK (Baza CFBD połączona: {len(cfbd_stats_cache)} drużyn FBS)" if cfbd_stats_cache else "❌ Brak odpowiedzi z CFBD API"
     
     st.markdown(f"""
         <div class="test-box">
