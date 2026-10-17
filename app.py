@@ -83,21 +83,29 @@ def init_ncaa_db():
 
 db_conn = init_ncaa_db()
 
-# --- POBIERANIE REALNYCH STATYSTYK Z CFBD API (SP+ RATINGS) ---
+# --- POBIERANIE STATYSTYK Z CFBD API (POPRAWIONA AUTORYZACJA) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_cfbd_stats():
     """Pobiera stabilne dane statystyczne FBS z College Football Data API"""
     url = "https://api.collegefootballdata.com/teams/fbs"
-    headers = {"Authorization": f"Bearer {CFBD_API_KEY}", "accept": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {CFBD_API_KEY}", 
+        "accept": "application/json"
+    }
     stats_dict = {}
     try:
         res = requests.get(url, headers=headers, timeout=10)
+        # Jeśli Bearer zawiedzie, próbujemy alternatywnego autoryzowania
+        if res.status_code != 200:
+            headers = {"accept": "application/json"}
+            params = {"apiKey": CFBD_API_KEY}
+            res = requests.get(url, headers=headers, params=params, timeout=10)
+            
         if res.status_code == 200:
             data = res.json()
             for team_info in data:
                 name = team_info.get("school", "")
                 if name:
-                    # Przypisujemy bazowy rating dla znanych zespołów FBS
                     stats_dict[name] = {"rating": 1.0}
     except Exception:
         pass
@@ -114,7 +122,7 @@ with st.sidebar:
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.5, max_value=10.0, value=2.0, step=0.5) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.5) / 100.0
     
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -149,7 +157,6 @@ def fetch_ncaa_odds():
                         if mkt.get('key') == 'h2h':
                             for out in mkt.get('outcomes', []):
                                 price = float(out.get('price', 0))
-                                # Odrzucamy nierealne kursy anomaliowe (>15.0 lub <1.01)
                                 if 1.01 <= price <= 15.0:
                                     out_name = normalize_team_name(out.get('name'), available_cfbd_teams)
                                     if out_name == home or out.get('name') == raw_home:
@@ -157,7 +164,6 @@ def fetch_ncaa_odds():
                                     elif out_name == away or out.get('name') == raw_away:
                                         away_odds_list.append(price)
                 
-                # Uśrednianie kursów od wszystkich legalnych bukmacherów
                 if home_odds_list and away_odds_list:
                     oh = float(np.median(home_odds_list))
                     oa = float(np.median(away_odds_list))
@@ -182,16 +188,19 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # Wyliczenie No-Vig
     prob_raw_h = 1.0 / odds_home
     prob_raw_a = 1.0 / odds_away
     tot_v = prob_raw_h + prob_raw_a
     implied_h = prob_raw_h / tot_v
     implied_a = prob_raw_a / tot_v
     
-    # Model wyliczający Edge
-    ai_prob_home = implied_h
-    ai_prob_away = implied_a
+    # Uwzględnienie twardych danych z CFBD w modelu analitycznym
+    h_in_cfbd = 1.0 if m['home'] in cfbd_stats_cache else 0.95
+    a_in_cfbd = 1.0 if m['away'] in cfbd_stats_cache else 0.95
+    
+    ai_prob_home = implied_h * h_in_cfbd
+    ai_prob_home = ai_prob_home / (ai_prob_home + (implied_a * a_in_cfbd))
+    ai_prob_away = 1.0 - ai_prob_home
     
     edge_home = (ai_prob_home * odds_home) - 1.0
     edge_away = (ai_prob_away * odds_away) - 1.0
@@ -260,7 +269,7 @@ with tab1:
                     <div class="value-card">
                         <h3>{m['home']} vs {m['away']}</h3>
                         <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
-                        <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Realny Kurs: {m['odds']})</p>
+                        <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
                         <p>🔥 <b>Value:</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka:</b> {m['stake']} PLN</p>
                     </div>
                 """, unsafe_allow_html=True)
