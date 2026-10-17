@@ -1,80 +1,12 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import requests
-import sqlite3
-from datetime import datetime, timezone, timedelta
-from rapidfuzz import process, fuzz
-
-# --- KONFIGURACJA STRONY ---
-st.set_page_config(
-    page_title="Maksbet NCAA - College Football Quant Engine",
-    page_icon="🏈",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# --- STYLE CSS ---
-st.markdown("""
-    <style>
-    .main { background-color: #0b0f19; color: #f3f4f6; }
-    [data-testid="stSidebar"] { background-color: #111827; border-right: 1px solid #1f2937; }
-    .stMetric { background: linear-gradient(135deg, #1f2937 0%, #111827 100%); padding: 15px; border-radius: 14px; border: 1px solid #374151; }
-    .value-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-left: 6px solid #3b82f6; padding: 20px; border-radius: 12px; margin-bottom: 15px; border: 1px solid #334155; }
-    .test-box { background: #111827; border: 1px solid #374151; padding: 15px; border-radius: 10px; margin-bottom: 10px; font-family: monospace; font-size: 13px; }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- CONFIG API ---
-ODDS_API_KEY = "3e81b37bac9bb7efbe8d2cf68065b6dc"
-ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
-
-# Klucz do College Football Data API
-CFBD_API_KEY = "Bu754KagVf9KUyZiMidj/5Zbi0ykn4CL16hS04SccbuUk2If+H4RLvGXssgGZ"
-
-# --- HYBRYDOWY SŁOWNIK ALIASÓW ---
-TEAM_ALIAS_MAP = {
-    "Alabama Crimson Tide": "Alabama",
-    "Georgia Bulldogs": "Georgia",
-    "Ohio State Buckeyes": "Ohio State",
-    "Michigan Wolverines": "Michigan",
-    "Texas Longhorns": "Texas",
-    "Notre Dame Fighting Irish": "Notre Dame",
-    "Oregon Ducks": "Oregon",
-    "Penn State Nittany Lions": "Penn State"
-}
-
-def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=70):
-    """Hybrydowe dopasowywanie: najpierw słownik stały, potem fuzzy matching."""
-    if not team_name_from_odds:
-        return "Unknown"
-        
-    if team_name_from_odds in TEAM_ALIAS_MAP:
-        return TEAM_ALIAS_MAP[team_name_from_odds]
-    
-    if not stats_team_list:
-        return team_name_from_odds
-
-    best_match, score, _ = process.extractOne(
-        team_name_from_odds, 
-        stats_team_list, 
-        scorer=fuzz.WRatio
-    )
-    
-    if score >= threshold:
-        return best_match
-    
-    return team_name_from_odds
-
-# --- POBIERANIE STATYSTYK Z COLLEGE FOOTBALL DATA API ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_cfbd_stats():
-    """Pobiera listę drużyn NCAA FBS z College Football Data API"""
+    """Pobiera listę drużyn NCAA FBS z College Football Data API z uwzględnieniem roku"""
     url = "https://api.collegefootballdata.com/teams/fbs"
     headers = {"Authorization": f"Bearer {CFBD_API_KEY}", "accept": "application/json"}
+    params = {"year": 2026}
     stats_dict = {}
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(url, headers=headers, params=params, timeout=10)
         if res.status_code == 200:
             data = res.json()
             for team_info in data:
@@ -83,9 +15,7 @@ def fetch_cfbd_stats():
                     stats_dict[name] = {"win_pct": 0.5}
     except Exception as e:
         pass
-    return stats_dict
-
-cfbd_stats_cache = fetch_cfbd_stats()
+    cfbd_stats_cache = fetch_cfbd_stats()
 available_cfbd_teams = list(cfbd_stats_cache.keys())
 
 # --- BAZA DANYCH SQLITE ---
@@ -132,7 +62,6 @@ with st.sidebar:
 # --- POBIERANIE KURSÓW Z THE ODDS API ---
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_ncaa_odds():
-    # Poprawiony klucz dla College Football w The Odds API: americanfootball_ncaaf
     url = f"{ODDS_BASE_URL}/americanfootball_ncaaf/odds"
     params = {"apiKey": ODDS_API_KEY, "regions": "us,eu", "markets": "h2h", "oddsFormat": "decimal"}
     all_m = []
@@ -179,13 +108,11 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # Matematyczne czyszczenie No-Vig
     prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     
-    # Statystyka i prawdopodobieństwo AI
     ai_prob_home = implied_h
     ai_prob_away = 1.0 - ai_prob_home
     
