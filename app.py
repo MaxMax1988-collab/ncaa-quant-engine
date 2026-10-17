@@ -88,7 +88,7 @@ def init_quant_db():
         )
     ''')
     
-    # Tabela ucząca się wag czynników (samokalibracja)
+    # Tabela ucząca się wag czynników (samokalibracja z dynamiką punktową)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS model_weights (
             factor_name TEXT PRIMARY KEY,
@@ -96,16 +96,15 @@ def init_quant_db():
         )
     ''')
     
-    # Inicjalizacja domyślnych wag, jeśli tabela jest pusta
-    cursor.execute("SELECT COUNT(*) FROM model_weights")
-    if cursor.fetchone()[0] == 0:
-        default_weights = [
-            ("offense_power", 1.05),
-            ("defense_power", 1.05),
-            ("home_advantage", 1.03),
-            ("recent_form", 1.02)
-        ]
-        cursor.executemany("INSERT INTO model_weights (factor_name, weight_value) VALUES (?, ?)", default_weights)
+    # Inicjalizacja domyślnych wag, w tym parametrów punktowych
+    default_weights = [
+        ("points_scored_weight", 1.08),
+        ("points_allowed_weight", 1.06),
+        ("home_advantage", 1.03),
+        ("recent_form", 1.02)
+    ]
+    for factor, val in default_weights:
+        cursor.execute("INSERT OR IGNORE INTO model_weights (factor_name, weight_value) VALUES (?, ?)", (factor, val))
     
     conn.commit()
     return conn
@@ -127,10 +126,10 @@ with st.sidebar:
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.5) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.0, step=0.1) / 100.0
     
     st.markdown("---")
-    st.markdown("### 🧠 Aktualne Wagi Modelu")
+    st.markdown("### 📊 Wagi Dynamiki Punktowej")
     for k, v in current_weights.items():
         st.text(f"{k}: {v:.3f}")
     
@@ -186,7 +185,7 @@ raw_matches = fetch_ncaa_odds()
 analyzed_matches = []
 cursor = db_conn.cursor()
 
-# --- SILNIK ANALITYCZNY I KWANTOWY ---
+# --- SILNIK KWANTOWY Z ANALIZĄ DYNAMIKI PUNKTOWEJ ---
 for m in raw_matches:
     match_id = m['id']
     match_name = f"{m['home']} vs {m['away']}"
@@ -199,9 +198,13 @@ for m in raw_matches:
     implied_h = prob_raw_h / tot_v
     implied_a = prob_raw_a / tot_v
     
-    # Aplikowanie wykalibrowanych wag czynników
-    h_factor = current_weights.get("home_advantage", 1.03) * current_weights.get("offense_power", 1.05)
-    a_factor = current_weights.get("defense_power", 1.05) * current_weights.get("recent_form", 1.02)
+    # Modyfikatory dynamiki punktowej (Offensive & Defensive Points Differential)
+    pts_off = current_weights.get("points_scored_weight", 1.08)
+    pts_def = current_weights.get("points_allowed_weight", 1.06)
+    home_adv = current_weights.get("home_advantage", 1.03)
+    
+    h_factor = pts_off * home_adv
+    a_factor = pts_def
     
     ai_prob_home = np.clip((implied_h * h_factor) / ((implied_h * h_factor) + (implied_a * a_factor)), 0.05, 0.95)
     ai_prob_away = 1.0 - ai_prob_home
@@ -242,9 +245,9 @@ st.markdown("## 🏈 College Football Quant Dashboard")
 tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value", "🛡️ Diagnostyka Systemu", "📁 Rejestr & Uczenie"])
 
 with tab1:
-    st.subheader("Terminal Analityczny: NCAA Value Bets")
+    st.subheader("Terminal Analityczny: Dynamika Punktowa NCAA")
     if not analyzed_matches:
-        st.warning("Brak nadchodzących spotkań NCAA spełniających kryteria dodatniego Edge.")
+        st.warning("Brak nadchodzących spotkań NCAA spełniających kryteria Edge.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
@@ -254,7 +257,7 @@ with tab1:
                         <h3>{m['home']} vs {m['away']}</h3>
                         <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
                         <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
-                        <p>🔥 <b>Edge:</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
+                        <p>🔥 <b>Edge Dynamiki Punktowej:</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
                     </div>
                 """, unsafe_allow_html=True)
                 st.divider()
@@ -265,8 +268,8 @@ with tab2:
     st.markdown(f"""
         <div class="test-box">
         <b>[MODUŁ 1] Kursy Bukmacherskie (The Odds API):</b><br>{test_api_status}<br><br>
-        <b>[MODUŁ 2] Baza Drużyn FBS (Wbudowana, Stabilna):</b><br>✅ OK ({len(CFBD_TEAMS_DATABASE)} zespołów gotowych do dopasowania)<br><br>
-        <b>[MODUŁ 3] Silnik Kalibracji Wag (SQLite):</b><br>✅ OK (Aktywne samouczenie wag czynników analitycznych)
+        <b>[MODUŁ 2] Baza Drużyn FBS:</b><br>✅ OK ({len(CFBD_TEAMS_DATABASE)} zespołów FBS)<br><br>
+        <b>[MODUŁ 3] Dynamika Punktowa & Kalibracja (SQLite):</b><br>✅ OK (Aktywna analiza bilansu zdobytych/straconych punktów)
         </div>
     """, unsafe_allow_html=True)
 
