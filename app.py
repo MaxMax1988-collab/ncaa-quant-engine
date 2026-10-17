@@ -29,6 +29,9 @@ st.markdown("""
 ODDS_API_KEY = "3e81b37bac9bb7efbe8d2cf68065b6dc"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
+# Twój klucz API do College Football Data
+CFBD_API_KEY = "Bu754KagVf9KUyZiMidj/5Zbi0ykn4CL16hS04SccbuUk2If+H4RLvGXssgGZ"
+
 # --- HYBRYDOWY SŁOWNIK ALIASÓW ---
 TEAM_ALIAS_MAP = {
     "Alabama Crimson Tide": "Alabama",
@@ -59,6 +62,33 @@ def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=75)
         return best_match
     
     return team_name_from_odds
+
+# --- POBIERANIE STATYSTYK Z COLLEGE FOOTBALL DATA API ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_cfbd_stats():
+    """Pobiera aktualne rekordy i statystyki drużyn NCAA FBS"""
+    url = "https://api.collegefootballdata.com/records"
+    headers = {"Authorization": f"Bearer {CFBD_API_KEY}", "accept": "application/json"}
+    params = {"year": datetime.now().year}
+    stats_dict = {}
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            for team_info in data:
+                name = team_info.get("team", "")
+                total = team_info.get("total", {})
+                wins = total.get("wins", 0)
+                losses = total.get("losses", 0)
+                tot_games = wins + losses
+                win_pct = (wins / tot_games) if tot_games > 0 else 0.5
+                stats_dict[name] = {"win_pct": win_pct}
+    except: 
+        pass
+    return stats_dict
+
+cfbd_stats_cache = fetch_cfbd_stats()
+available_cfbd_teams = list(cfbd_stats_cache.keys())
 
 # --- BAZA DANYCH SQLITE ---
 def init_ncaa_db():
@@ -120,15 +150,21 @@ def fetch_ncaa_odds():
                         if m_time > max_h: continue
                     except: pass
                 match_id = match.get('id')
-                home = normalize_team_name(match.get('home_team'))
-                away = normalize_team_name(match.get('away_team'))
+                
+                raw_home = match.get('home_team')
+                raw_away = match.get('away_team')
+                
+                # Zastosowanie hybrydowego dopasowania nazw
+                home = normalize_team_name(raw_home, available_cfbd_teams)
+                away = normalize_team_name(raw_away, available_cfbd_teams)
+                
                 oh, oa = 1.90, 1.90
                 books = match.get('bookmakers', [])
                 if books:
                     for mkt in books[0].get('markets', []):
                         if mkt.get('key') == 'h2h':
                             for out in mkt.get('outcomes', []):
-                                out_name = normalize_team_name(out.get('name'))
+                                out_name = normalize_team_name(out.get('name'), available_cfbd_teams)
                                 if out_name == home: oh = float(out.get('price', 1.90))
                                 elif out_name == away: oa = float(out.get('price', 1.90))
                 all_m.append({"id": str(match_id), "home": home, "away": away, "commence_time": commence, "odds_home": oh, "odds_away": oa})
@@ -150,7 +186,15 @@ for m in raw_matches:
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     no_vig_sum = implied_h + (1.0 - implied_h)
     
-    ai_prob_home = implied_h
+    # Korekta statystyczna z CFBD API
+    stat_delta = 0.0
+    h_s = cfbd_stats_cache.get(m['home'])
+    a_s = cfbd_stats_cache.get(m['away'])
+    if h_s and a_s:
+        win_diff = h_s["win_pct"] - a_s["win_pct"]
+        stat_delta = win_diff * 0.10 # Waga bilansu zwycięstw
+        
+    ai_prob_home = np.clip(implied_h + stat_delta, 0.05, 0.95)
     ai_prob_away = 1.0 - ai_prob_home
     
     edge_home = (ai_prob_home * odds_home) - 1.0
@@ -215,11 +259,14 @@ with tab1:
 with tab2:
     st.subheader("🛡️ Terminal Diagnostyczny NCAA")
     test_api_status = "✅ OK (Połączenie stabilne)" if raw_matches else "❌ Brak danych w oknie 96h"
+    cfbd_status = f"✅ OK ({len(cfbd_stats_cache)} drużyn w bazie)" if cfbd_stats_cache else "❌ Problem z pobieraniem statystyk CFBD"
     st.markdown(f"""
         <div class="test-box">
         <b>[TEST 1] Zewnętrzne API Kursów NCAA (The Odds API):</b><br>
         Status: {test_api_status}<br>
-        Pobrano surowych meczów: <b>{len(raw_matches)}</b>
+        Pobrano surowych meczów: <b>{len(raw_matches)}</b><br><br>
+        <b>[TEST 2] Zewnętrzne API Statystyk (College Football Data):</b><br>
+        Status: {cfbd_status}
         </div>
     """, unsafe_allow_html=True)
 
@@ -230,4 +277,4 @@ with tab3:
         st.info("Brak zapisanych zakładów NCAA.")
     else: 
         st.dataframe(df_bets, use_container_width=True)
-  
+        
