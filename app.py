@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import requests
 import sqlite3
-import os
 from datetime import datetime, timezone, timedelta
 from rapidfuzz import process, fuzz
 
@@ -58,14 +57,15 @@ def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=70)
     )
     return best_match if score >= threshold else team_name_from_odds
 
-# --- BAZA DANYCH SQLITE (Z NAPRAWĄ SCHEMATU) ---
+# --- BAZA DANYCH SQLITE (Z AUTOMATYCZNYM RESETEM SCHEMATU) ---
 def init_ncaa_db():
     db_file = "ncaa_bets_database.db"
     conn = sqlite3.connect(db_file, check_same_thread=False)
     cursor = conn.cursor()
-    # Tworzymy tabelę z dokładną liczbą 13 kolumn odpowiadających zapytaniu INSERT
+    # Wymuszenie czystej, poprawnej tabeli
+    cursor.execute('DROP TABLE IF EXISTS ncaa_bets')
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ncaa_bets (
+        CREATE TABLE ncaa_bets (
             id TEXT PRIMARY KEY,
             date TEXT,
             match_name TEXT,
