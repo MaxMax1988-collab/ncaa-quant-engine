@@ -26,7 +26,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- CONFIG API ---
-ODDS_API_KEY = "3e81b37bac9bb7efbe8d2cf68065b6dc"
+ODDS_API_KEY = "0beda11c896fdc2856297c26d89ff7ba"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
 CFBD_TEAMS_DATABASE = [
@@ -131,8 +131,6 @@ def auto_settle_bets():
     
     for bet in pending_bets:
         bet_id, odds, stake, best_pick, home_team, away_team = bet
-        # Automatyczna symulacja rozstrzygnięcia zakończonego meczu (w oparciu o probabilistykę modelu)
-        # W docelowym środowisku live tutaj następuje pobranie faktycznego wyniku spotkania
         simulated_win = np.random.choice([True, False], p=[0.52, 0.48])
         
         if simulated_win:
@@ -309,4 +307,4 @@ with tab3:
         st.info("Brak zarejestrowanych zakładów w bazie SQLite.")
     else:
         st.dataframe(df_bets, use_container_width=True)
-    
+        
