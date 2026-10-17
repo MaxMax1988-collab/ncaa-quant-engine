@@ -57,12 +57,10 @@ def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=70)
     )
     return best_match if score >= threshold else team_name_from_odds
 
-# --- BAZA DANYCH SQLITE (Z AUTOMATYCZNYM RESETEM SCHEMATU) ---
+# --- BAZA DANYCH SQLITE ---
 def init_ncaa_db():
-    db_file = "ncaa_bets_database.db"
-    conn = sqlite3.connect(db_file, check_same_thread=False)
+    conn = sqlite3.connect("ncaa_bets_database.db", check_same_thread=False)
     cursor = conn.cursor()
-    # Wymuszenie czystej, poprawnej tabeli
     cursor.execute('DROP TABLE IF EXISTS ncaa_bets')
     cursor.execute('''
         CREATE TABLE ncaa_bets (
@@ -213,8 +211,25 @@ for m in raw_matches:
         cursor.execute("SELECT id FROM ncaa_bets WHERE id = ?", (match_id,))
         if not cursor.fetchone():
             cursor.execute(
-                "INSERT INTO ncaa_bets VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Oczekujący', 0.0, ?, ?, ?)",
-                (match_id, datetime.now().strftime("%Y-%m-%d"), match_name, best_odds, best_prob, best_edge, stake, m['home'], m['away'], best_pick)
+                """
+                INSERT INTO ncaa_bets 
+                (id, date, match_name, odds, ai_prob, edge, stake, status, profit, home_team, away_team, best_pick)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    match_id, 
+                    datetime.now().strftime("%Y-%m-%d"), 
+                    match_name, 
+                    best_odds, 
+                    best_prob, 
+                    best_edge, 
+                    stake, 
+                    'Oczekujący', 
+                    0.0, 
+                    m['home'], 
+                    m['away'], 
+                    best_pick
+                )
             )
             db_conn.commit()
 
