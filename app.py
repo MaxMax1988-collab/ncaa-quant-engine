@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 import sqlite3
+import os
 from datetime import datetime, timezone, timedelta
 from rapidfuzz import process, fuzz
 
@@ -28,8 +29,6 @@ st.markdown("""
 # --- CONFIG API ---
 ODDS_API_KEY = "3e81b37bac9bb7efbe8d2cf68065b6dc"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
-
-# Klucz do College Football Data API
 CFBD_API_KEY = "Bu754KagVf9KUyZiMidj/5Zbi0ykn4CL16hS04SccbuUk2If+H4RLvGXssgGZ"
 
 # --- HYBRYDOWY SŁOWNIK ALIASÓW ---
@@ -59,41 +58,12 @@ def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=70)
     )
     return best_match if score >= threshold else team_name_from_odds
 
-# --- POBIERANIE REALNYCH STATYSTYK Z CFBD API ---
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_cfbd_stats():
-    """Pobiera twarde statystyki drużyn z College Football Data API"""
-    url = "https://api.collegefootballdata.com/stats/season"
-    headers = {"Authorization": f"Bearer {CFBD_API_KEY}", "accept": "application/json"}
-    # Pobieramy statystyki dla bieżącego sezonu
-    params = {"year": 2026}
-    stats_dict = {}
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        if res.status_code == 200:
-            for item in res.json():
-                team = item.get("team")
-                stat_name = item.get("statName")
-                stat_val = item.get("statValue", 0)
-                
-                if team not in stats_dict:
-                    stats_dict[team] = {"offense_pts": 0, "defense_pts": 0, "games": 0}
-                
-                if stat_name == "points":
-                    stats_dict[team]["offense_pts"] = float(stat_val)
-                elif stat_name == "games":
-                    stats_dict[team]["games"] = float(stat_val) if float(stat_val) > 0 else 1
-    except Exception:
-        pass
-    return stats_dict
-
-cfbd_stats_cache = fetch_cfbd_stats()
-available_cfbd_teams = list(cfbd_stats_cache.keys())
-
-# --- BAZA DANYCH SQLITE ---
+# --- BAZA DANYCH SQLITE (Z NAPRAWĄ SCHEMATU) ---
 def init_ncaa_db():
-    conn = sqlite3.connect("ncaa_bets_database.db", check_same_thread=False)
+    db_file = "ncaa_bets_database.db"
+    conn = sqlite3.connect(db_file, check_same_thread=False)
     cursor = conn.cursor()
+    # Tworzymy tabelę z dokładną liczbą 13 kolumn odpowiadających zapytaniu INSERT
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ncaa_bets (
             id TEXT PRIMARY KEY,
@@ -115,6 +85,35 @@ def init_ncaa_db():
 
 db_conn = init_ncaa_db()
 
+# --- POBIERANIE STATYSTYK Z CFBD API ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_cfbd_stats():
+    url = "https://api.collegefootballdata.com/stats/season"
+    headers = {"Authorization": f"Bearer {CFBD_API_KEY}", "accept": "application/json"}
+    params = {"year": 2026}
+    stats_dict = {}
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        if res.status_code == 200:
+            for item in res.json():
+                team = item.get("team")
+                stat_name = item.get("statName")
+                stat_val = item.get("statValue", 0)
+                
+                if team not in stats_dict:
+                    stats_dict[team] = {"offense_pts": 0, "games": 1}
+                
+                if stat_name == "points":
+                    stats_dict[team]["offense_pts"] = float(stat_val)
+                elif stat_name == "games":
+                    stats_dict[team]["games"] = float(stat_val) if float(stat_val) > 0 else 1
+    except Exception:
+        pass
+    return stats_dict
+
+cfbd_stats_cache = fetch_cfbd_stats()
+available_cfbd_teams = list(cfbd_stats_cache.keys())
+
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA")
@@ -123,7 +122,7 @@ with st.sidebar:
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=1.0, step=0.5) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.5) / 100.0
     
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -174,26 +173,24 @@ def fetch_ncaa_odds():
 
 raw_matches = fetch_ncaa_odds()
 analyzed_matches = []
+cursor = db_conn.cursor()
 
 for m in raw_matches:
     match_id = m['id']
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # 1. Obliczenie prawdopodobieństwa bukmacherskiego (No-Vig)
     prob_raw_h = 1.0 / odds_home if odds_home > 0 else 0.5
     prob_raw_a = 1.0 / odds_away if odds_away > 0 else 0.5
     tot_v = prob_raw_h + prob_raw_a
     implied_h = prob_raw_h / tot_v if tot_v > 0 else 0.5
     
-    # 2. Obliczenie czystego prawdopodobieństwa AI na bazie twardych statystyk CFBD
     h_stats = cfbd_stats_cache.get(m['home'], {})
     a_stats = cfbd_stats_cache.get(m['away'], {})
     
     h_avg_pts = h_stats.get('offense_pts', 0) / max(1, h_stats.get('games', 1))
     a_avg_pts = a_stats.get('offense_pts', 0) / max(1, a_stats.get('games', 1))
     
-    # Korekta prawdopodobieństwa o różnicę punktową ze statystyk
     stat_diff = h_avg_pts - a_avg_pts
     stat_modifier = np.clip(stat_diff * 0.015, -0.20, 0.20)
     
@@ -245,7 +242,6 @@ with tab1:
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
-            prob_pct = round(m['ai_prob'] * 100, 1)
             with st.container():
                 st.markdown(f"""
                     <div class="value-card">
@@ -278,3 +274,4 @@ with tab3:
         st.info("Brak zapisanych zakładów NCAA.")
     else: 
         st.dataframe(df_bets, use_container_width=True)
+        
