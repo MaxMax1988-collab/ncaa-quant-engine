@@ -28,7 +28,7 @@ st.markdown("""
 # --- CONFIG API ---
 ODDS_API_KEY = "3e81b37bac9bb7efbe8d2cf68065b6dc"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
-CFBD_API_KEY = "Bu754KagVf9yKUyZiMIdj/5ZbiOlykn4CL16hS04SccbuUhk2If+H4RLvGXssgGZ"
+CFBD_API_KEY = "Bu754KagVf9yKUyZiMIdj/5Zbi0lykn4CL16hS04SccbuUk2If+H4RLvGXssgGZ"
 
 # Asekuracyjna lista głównych drużyn FBS NCAA w przypadku problemów z limitem API
 STATIC_FBS_FALLBACK = [
@@ -302,3 +302,4 @@ with tab3:
         st.info("Brak zapisanych zakładów NCAA.")
     else: 
         st.dataframe(df_bets, use_container_width=True)
+        
