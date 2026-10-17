@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import requests
 import sqlite3
-import cfbd
 from datetime import datetime, timezone, timedelta
 from rapidfuzz import process, fuzz
 
@@ -84,22 +83,49 @@ def init_ncaa_db():
 
 db_conn = init_ncaa_db()
 
-# --- POBIERANIE STATYSTYK Z OFICJALNEGO SDK CFBD ---
+# --- POBIERANIE STATYSTYK Z CFBD API (MULTI-AUTH FALLBACK) ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_cfbd_stats():
-    """Pobiera listę zespołów FBS za pomocą oficjalnej biblioteki cfbd"""
-    configuration = cfbd.Configuration(access_token=CFBD_API_KEY)
+    url = "https://api.collegefootballdata.com/teams/fbs"
     stats_dict = {}
+    
+    # 1. Próba Bearer
     try:
-        with cfbd.ApiClient(configuration) as api_client:
-            teams_api = cfbd.TeamsApi(api_client)
-            fbs_teams = teams_api.get_fbs_teams(year=2026)
-            for team in fbs_teams:
-                school = team.school
-                if school:
-                    stats_dict[school] = {"active": True}
+        res = requests.get(url, headers={"Authorization": f"Bearer {CFBD_API_KEY}", "accept": "application/json"}, timeout=10)
+        if res.status_code == 200:
+            for team in res.json():
+                name = team.get("school", "")
+                if name:
+                    stats_dict[name] = {"active": True}
+            if stats_dict:
+                return stats_dict
     except Exception:
         pass
+
+    # 2. Próba ApiKey
+    try:
+        res = requests.get(url, headers={"Authorization": f"ApiKey {CFBD_API_KEY}", "accept": "application/json"}, timeout=10)
+        if res.status_code == 200:
+            for team in res.json():
+                name = team.get("school", "")
+                if name:
+                    stats_dict[name] = {"active": True}
+            if stats_dict:
+                return stats_dict
+    except Exception:
+        pass
+
+    # 3. Próba z parametrem w zapytaniu
+    try:
+        res = requests.get(url, params={"apiKey": CFBD_API_KEY}, timeout=10)
+        if res.status_code == 200:
+            for team in res.json():
+                name = team.get("school", "")
+                if name:
+                    stats_dict[name] = {"active": True}
+    except Exception:
+        pass
+        
     return stats_dict
 
 cfbd_stats_cache = fetch_cfbd_stats()
@@ -179,7 +205,6 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # Model No-Vig
     prob_raw_h = 1.0 / odds_home
     prob_raw_a = 1.0 / odds_away
     tot_v = prob_raw_h + prob_raw_a
@@ -269,13 +294,13 @@ with tab1:
 with tab2:
     st.subheader("🛡️ Terminal Diagnostyczny NCAA")
     test_api_status = f"✅ OK (Pobrano i przeanalizowano meczów: {len(raw_matches)})" if raw_matches else "❌ Brak danych"
-    cfbd_status = f"✅ OK (SDK CFBD połączone: {len(cfbd_stats_cache)} drużyn FBS)" if cfbd_stats_cache else "❌ Problem z SDK CFBD"
+    cfbd_status = f"✅ OK (Baza CFBD połączona: {len(cfbd_stats_cache)} drużyn FBS)" if cfbd_stats_cache else "❌ Brak odpowiedzi z CFBD API"
     
     st.markdown(f"""
         <div class="test-box">
         <b>[TEST 1] Zewnętrzne API Kursów NCAA (The Odds API):</b><br>
         Status: {test_api_status}<br><br>
-        <b>[TEST 2] Oficjalne SDK Statystyk (College Football Data):</b><br>
+        <b>[TEST 2] Zewnętrzne API Statystyk (College Football Data):</b><br>
         Status: {cfbd_status}
         </div>
     """, unsafe_allow_html=True)
@@ -287,4 +312,4 @@ with tab3:
         st.info("Brak zapisanych zakładów NCAA.")
     else: 
         st.dataframe(df_bets, use_container_width=True)
-        
+                
