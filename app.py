@@ -5,6 +5,7 @@ import requests
 import sqlite3
 from datetime import datetime
 from rapidfuzz import process, fuzz
+import plotly.express as px
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
@@ -51,7 +52,6 @@ CFBD_TEAMS_DATABASE = [
     "Western Michigan", "Wisconsin", "Wyoming"
 ]
 
-# MACIERZ SIŁY KONFERENCJI (STRENGTH OF SCHEDULE MATRIX)
 CONFERENCE_TIERS = {
     "P4_TOP": ["Georgia", "Alabama", "Ohio State", "Texas", "Oregon", "Penn State", "Notre Dame", "Ole Miss", "LSU"],
     "P4_MID": ["Michigan", "Tennessee", "Clemson", "Missouri", "Oklahoma", "Texas A&M", "USC", "Utah", "Louisville", "Syracuse", "Florida", "Kentucky", "Auburn", "Wisconsin", "Iowa"],
@@ -105,7 +105,6 @@ def init_quant_db():
         )
     ''')
     
-    # Tabela śledzenia ruchów kursowych (Market Movement / CLV)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS line_movement (
             match_id TEXT PRIMARY KEY,
@@ -182,7 +181,7 @@ current_weights = load_weights()
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Autonomous Self-Learning Engine v2.0")
+    st.caption("Autonomous Self-Learning Engine v2.1")
     st.markdown("---")
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
@@ -236,7 +235,6 @@ def fetch_ncaa_odds():
                     med_home = float(np.median(home_odds_list))
                     med_away = float(np.median(away_odds_list))
                     
-                    # Tracking Ruchów Kursowych (Market Line Drift)
                     cursor.execute("SELECT initial_odds_home, initial_odds_away FROM line_movement WHERE match_id = ?", (match_id,))
                     row = cursor.fetchone()
                     if not row:
@@ -253,7 +251,6 @@ def fetch_ncaa_odds():
                         )
                     db_conn.commit()
                     
-                    # Wyliczenie dryfu rynkowego (%)
                     drift_home = (init_h - med_home) / init_h if init_h > 0 else 0
                     drift_away = (init_a - med_away) / init_a if init_a > 0 else 0
                     
@@ -271,7 +268,6 @@ raw_matches = fetch_ncaa_odds()
 analyzed_matches = []
 cursor = db_conn.cursor()
 
-# --- SILNIK KWANTOWY Z MODUŁAMI CLV I DYNAMICS ---
 for m in raw_matches:
     match_id = m['id']
     match_name = f"{m['home']} vs {m['away']}"
@@ -289,11 +285,9 @@ for m in raw_matches:
     conf_w = current_weights.get("conference_strength_weight", 1.05)
     clv_w = current_weights.get("clv_movement_weight", 1.04)
     
-    # 1. Modyfikator Conference Strength
     conf_h = get_team_conf_weight(m['home'])
     conf_a = get_team_conf_weight(m['away'])
     
-    # 2. Modyfikator Market Movement / CLV
     clv_mod_h = 1.0 + (m['drift_home'] * clv_w)
     clv_mod_a = 1.0 + (m['drift_away'] * clv_w)
     
@@ -344,8 +338,8 @@ for m in raw_matches:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v2.0")
-tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value & CLV", "🛡️ Diagnostyka Systemu", "📁 Rejestr & Pętla Uczenia"])
+st.markdown("## 🏈 College Football Quant Dashboard v2.1")
+tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value & CLV", "📈 Statystyki & ROI Live", "🛡️ Diagnostyka Systemu", "📁 Rejestr & Pętla Uczenia"])
 
 with tab1:
     st.subheader("Terminal Analityczny: Ruch Kursowy & Strength of Schedule")
@@ -370,6 +364,50 @@ with tab1:
                 st.divider()
 
 with tab2:
+    st.subheader("📈 Analiza Skutecznosti & Krzywa Kapitału (Equity Curve)")
+    df_stats = pd.read_sql("SELECT * FROM ncaa_bets WHERE status != 'Oczekujący'", db_conn)
+    
+    if df_stats.empty:
+        st.info("Brak rozliczonych zakładów w bazie. Poczekaj na zakończenie pierwszych symulacji meczów.")
+    else:
+        total_bets = len(df_stats)
+        won_bets = len(df_stats[df_stats['status'] == 'Wygrany'])
+        win_rate = (won_bets / total_bets) * 100 if total_bets > 0 else 0
+        total_profit = df_stats['profit'].sum()
+        total_staked = df_stats['stake'].sum()
+        roi = (total_profit / total_staked) * 100 if total_staked > 0 else 0
+        
+        # Wyświetlenie kafelków KPI
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Rozliczone Zakłady", total_bets)
+        col2.metric("Skuteczność (Win Rate)", f"{win_rate:.1f}%")
+        col3.metric("Całkowity Zysk", f"{total_profit:.2f} PLN", delta=f"{total_profit:.2f}")
+        col4.metric("ROI Modelu", f"{roi:.2f}%", delta=f"{roi:.2f}%")
+        
+        st.markdown("---")
+        
+        # Wykres liniowy ewolucji kapitału
+        df_stats['cumulative_profit'] = df_stats['profit'].cumsum()
+        df_stats['equity'] = bankroll + df_stats['cumulative_profit']
+        
+        fig = px.line(
+            df_stats, 
+            x=df_stats.index, 
+            y='equity', 
+            markers=True,
+            title="Krzywa Wzrostu Kapitału (Equity Curve)",
+            labels={'index': 'Kolejny Zakład', 'equity': 'Kapitał (PLN)'}
+        )
+        fig.update_layout(
+            plot_bgcolor='#0b0f19',
+            paper_bgcolor='#0b0f19',
+            font_color='#f3f4f6',
+            xaxis=dict(showgrid=True, gridcolor='#1f2937'),
+            yaxis=dict(showgrid=True, gridcolor='#1f2937')
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+with tab3:
     st.subheader("🛡️ Status Komponentów Kwantowych")
     test_api_status = f"✅ OK (Pobrano meczów rynkowych: {len(raw_matches)})" if raw_matches else "❌ Brak danych z The Odds API"
     st.markdown(f"""
@@ -381,7 +419,7 @@ with tab2:
         </div>
     """, unsafe_allow_html=True)
 
-with tab3:
+with tab4:
     st.subheader("📁 Rejestr Zakładów i Samokalibracja Modelu")
     df_bets = pd.read_sql("SELECT * FROM ncaa_bets", db_conn)
     if df_bets.empty:
