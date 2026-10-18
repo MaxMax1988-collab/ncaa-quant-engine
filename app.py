@@ -12,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet NCAA - Autonomous Quant Engine (Safe ML Edition)",
+    page_title="Maksbet NCAA - Autonomous Quant Engine (ML Edition)",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -120,6 +120,7 @@ def init_quant_db():
         )
     ''')
     
+    # Tabela cech treningowych dla modelu ML
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ml_training_features (
             bet_id TEXT PRIMARY KEY,
@@ -132,24 +133,6 @@ def init_quant_db():
     ''')
     
     conn.commit()
-    
-    # Backfill
-    cursor.execute("SELECT COUNT(*) FROM ml_training_features")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("SELECT id, odds, ai_prob, home_team, away_team, status FROM ncaa_bets WHERE status != 'Oczekujący'")
-        settled = cursor.fetchall()
-        for s in settled:
-            b_id, odds, ai_p, h_t, a_t, stat = s
-            t_val = 1 if stat == 'Wygrany' else 0
-            c_h = get_team_conf_weight(h_t)
-            c_a = get_team_conf_weight(a_t)
-            c_diff = c_h - c_a
-            cursor.execute(
-                "INSERT OR IGNORE INTO ml_training_features (bet_id, implied_prob, odds, conf_diff, clv_drift, target_won) VALUES (?, ?, ?, ?, ?, ?)",
-                (b_id, ai_p, odds, c_diff, 0.05, t_val)
-            )
-        conn.commit()
-        
     return conn
 
 db_conn = init_quant_db()
@@ -174,6 +157,7 @@ def auto_settle_bets():
             
         cursor.execute("UPDATE ncaa_bets SET status = ?, profit = ? WHERE id = ?", (status, profit, bet_id))
         
+        # Zapis cech do bazy danych treningowych ML
         conf_h = get_team_conf_weight(home_team)
         conf_a = get_team_conf_weight(away_team)
         conf_diff = conf_h - conf_a
@@ -186,13 +170,15 @@ def auto_settle_bets():
 
 auto_settle_bets()
 
+# --- TRENOWANIE MODELU MACHINE LEARNING (SKLEARN) ---
 @st.cache_resource
 def train_ml_model():
     cursor = db_conn.cursor()
     cursor.execute("SELECT implied_prob, odds, conf_diff, clv_drift, target_won FROM ml_training_features")
     rows = cursor.fetchall()
     
-    if len(rows) < 3:
+    # Jeśli mamy za mało danych w bazie, zwracamy domyślny model / tryb heurystyczny
+    if len(rows) < 5:
         return None, None
         
     df_ml = pd.DataFrame(rows, columns=['implied_prob', 'odds', 'conf_diff', 'clv_drift', 'target_won'])
@@ -212,24 +198,19 @@ ml_model, ml_scaler = train_ml_model()
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Autonomous ML Engine v3.1 (Safe)")
+    st.caption("Autonomous ML Engine v3.0 (Scikit-Learn)")
     st.markdown("---")
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=3.0, step=0.1) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.0, step=0.1) / 100.0
     
     st.markdown("---")
     st.markdown("### 🤖 Status Modelu ML")
     if ml_model is not None:
-        st.success("✅ Model ML wytrenowany i aktywny")
-        st.markdown("#### 🧠 Wagi Współczynników")
-        feature_names = ['Implied Prob', 'Kurs (Odds)', 'Różnica Konf.', 'CLV Drift']
-        coefs = ml_model.coef_[0]
-        for name, coef in zip(feature_names, coefs):
-            st.text(f"{name}: {coef:.4f}")
+        st.success("✅ Model ML wytrenowany i aktywny (Logistic Regression)")
     else:
-        st.info("ℹ️ Zbieranie danych (Tryb hybrydowy)")
+        st.info("ℹ️ Zbieranie danych (Tryb hybrydowy/heurystyczny)")
     
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -262,8 +243,7 @@ def fetch_ncaa_odds():
                         if mkt.get('key') == 'h2h':
                             for out in mkt.get('outcomes', []):
                                 price = float(out.get('price', 0))
-                                # SANITY CHECK: Odrzucamy kursy powyżej 5.0 oraz poniżej 1.10
-                                if 1.10 <= price <= 5.0:
+                                if 1.01 <= price <= 15.0:
                                     out_name = normalize_team_name(out.get('name'), CFBD_TEAMS_DATABASE)
                                     if out_name == home or out.get('name') == raw_home:
                                         home_odds_list.append(price)
@@ -323,6 +303,7 @@ for m in raw_matches:
     conf_diff_h = conf_h - conf_a
     conf_diff_a = conf_a - conf_h
     
+    # Prawdopodobieństwo AI: Model ML lub zaawansowana heurystyka bazowa
     if ml_model is not None and ml_scaler is not None:
         try:
             X_pred_h = ml_scaler.transform([[implied_h, odds_home, conf_diff_h, m['drift_home']]])
@@ -331,10 +312,7 @@ for m in raw_matches:
             X_pred_a = ml_scaler.transform([[implied_a, odds_away, conf_diff_a, m['drift_away']]])
             ai_prob_away = float(ml_model.predict_proba(X_pred_a)[0][1])
             
-            # Bezpieczne baundowanie predykcji, aby uniknąć skrajności
-            ai_prob_home = np.clip(ai_prob_home, implied_h - 0.10, implied_h + 0.12)
-            ai_prob_away = np.clip(ai_prob_away, implied_a - 0.10, implied_a + 0.12)
-            
+            # Normalizacja prawdopodobieństw do sumy 1.0
             total_ai = ai_prob_home + ai_prob_away
             if total_ai > 0:
                 ai_prob_home /= total_ai
@@ -342,7 +320,8 @@ for m in raw_matches:
         except Exception:
             ai_prob_home, ai_prob_away = implied_h, implied_a
     else:
-        ai_prob_home = np.clip(implied_h * 1.02 * (conf_h / conf_a), 0.05, 0.95)
+        # Fallback heurystyczny
+        ai_prob_home = np.clip(implied_h * 1.05 * (conf_h / conf_a), 0.05, 0.95)
         ai_prob_away = 1.0 - ai_prob_home
     
     edge_home = (ai_prob_home * odds_home) - 1.0
@@ -354,10 +333,6 @@ for m in raw_matches:
     else:
         best_pick, best_prob, best_odds, best_edge = m['away'], ai_prob_away, odds_away, edge_away
         best_drift = m['drift_away']
-    
-    # SANITY CHECK: Twardy limit Edge max 25% (0.25) - wycina nierealne błędy i anomalia
-    if best_edge > 0.25:
-        continue
     
     b = best_odds - 1.0
     kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
@@ -390,20 +365,20 @@ for m in raw_matches:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v3.1 (Safe ML)")
+st.markdown("## 🏈 College Football Quant Dashboard v3.0 (ML)")
 tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value & ML", "📈 Statystyki & ROI Live", "🛡️ Diagnostyka Systemu", "📁 Rejestr & Pętla Uczenia"])
 
 with tab1:
-    st.subheader("Terminal Analityczny: Zweryfikowane Predykcje ML")
+    st.subheader("Terminal Analityczny: Predykcje Machine Learning")
     if not analyzed_matches:
-        st.warning("Brak nadchodzących spotkań NCAA spełniających bezpieczne kryteria Edge.")
+        st.warning("Brak nadchodzących spotkań NCAA spełniających kryteria Edge.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
             drift_pct = round(m['drift'] * 100, 2)
             clv_badge = f'<span class="badge-clv">📈 Market Line Moving (+{drift_pct}%)</span>' if drift_pct > 0 else ''
             conf_badge = '<span class="badge-conf">🏆 Conference Adjusted</span>'
-            ml_badge = '<span class="badge-ml">🤖 Safe Scikit-Learn</span>'
+            ml_badge = '<span class="badge-ml">🤖 Scikit-Learn Model</span>'
             
             with st.container():
                 st.markdown(f"""
@@ -411,7 +386,7 @@ with tab1:
                         <h3>{m['home']} vs {m['away']} {clv_badge} {conf_badge} {ml_badge}</h3>
                         <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
                         <p>🎯 <b>Typ AI (ML):</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
-                        <p>🔥 <b>Edge (Zweryfikowany):</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
+                        <p>🔥 <b>Edge:</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
                     </div>
                 """, unsafe_allow_html=True)
                 st.divider()
@@ -421,7 +396,7 @@ with tab2:
     df_stats = pd.read_sql("SELECT * FROM ncaa_bets WHERE status != 'Oczekujący'", db_conn)
     
     if df_stats.empty:
-        st.info("Brak rozliczonych zakładów w bazie.")
+        st.info("Brak rozliczonych zakładów w bazie. Poczekaj na zakończenie pierwszych symulacji meczów.")
     else:
         total_bets = len(df_stats)
         won_bets = len(df_stats[df_stats['status'] == 'Wygrany'])
@@ -447,13 +422,13 @@ with tab2:
 with tab3:
     st.subheader("🛡️ Status Komponentów Kwantowych")
     test_api_status = f"✅ OK (Pobrano meczów rynkowych: {len(raw_matches)})" if raw_matches else "❌ Brak danych z The Odds API"
-    ml_status_text = "✅ Aktywny z filtrami bezpieczeństwa (Sanity Check)" if ml_model is not None else "ℹ️ Oczekiwanie na próbki"
+    ml_status_text = "✅ Wytrenowany na danych z SQLite" if ml_model is not None else "ℹ️ Zbieranie próbek do pierwszego treningu ML"
     st.markdown(f"""
         <div class="test-box">
         <b>[MODUŁ 1] Kursy Bukmacherskie (The Odds API):</b><br>{test_api_status}<br><br>
         <b>[MODUŁ 2] Baza Drużyn FBS & Conference Matrix:</b><br>✅ OK ({len(CFBD_TEAMS_DATABASE)} zespołów + Macierz Konferencji)<br><br>
-        <b>[MODUŁ 3] Market Line Movement (CLV Tracking):</b><br>✅ OK (Śledzenie dryfu rynkowego w czasie rzeczywistym)<br><br>
-        <b>[MODUŁ 4] Algorytm Machine Learning & Sanity Filters:</b><br>{ml_status_text}<br><br>
+         <b>[MODUŁ 3] Market Line Movement (CLV Tracking):</b><br>✅ OK (Śledzenie dryfu rynkowego w czasie rzeczywistym)<br><br>
+        <b>[MODUŁ 4] Algorytm Machine Learning (Scikit-Learn):</b><br>{ml_status_text}<br><br>
         <b>[MODUŁ 5] Automatyczne Rozliczanie & Self-Learning:</b><br>✅ OK (Aktywna pętla zapisu cech w SQLite)
         </div>
     """, unsafe_allow_html=True)
