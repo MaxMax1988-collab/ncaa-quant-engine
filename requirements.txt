@@ -4,3 +4,4 @@ numpy
 requests
 rapidfuzz
 cfbd
+plotly
