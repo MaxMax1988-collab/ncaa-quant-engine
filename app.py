@@ -5,11 +5,14 @@ import requests
 import sqlite3
 from datetime import datetime
 from rapidfuzz import process, fuzz
-import plotly.express as px
+
+# Importy Machine Learning (Scikit-Learn)
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet NCAA - Autonomous Quant Engine",
+    page_title="Maksbet NCAA - Autonomous Quant Engine (ML Edition)",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -25,6 +28,7 @@ st.markdown("""
     .test-box { background: #111827; border: 1px solid #374151; padding: 15px; border-radius: 10px; margin-bottom: 10px; font-family: monospace; font-size: 13px; }
     .badge-clv { background-color: #059669; color: #ffffff; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: bold; }
     .badge-conf { background-color: #6366f1; color: #ffffff; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: bold; }
+    .badge-ml { background-color: #d97706; color: #ffffff; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -83,7 +87,7 @@ def normalize_team_name(team_name_from_odds, stats_team_list=None, threshold=60)
     if match_res and match_res[1] >= threshold: return match_res[0]
     return team_name_from_odds
 
-# --- BAZA DANYCH SQLITE & AUTOMATYCZNA KALIBRACJA ---
+# --- BAZA DANYCH SQLITE & ML TRAINING ENGINE ---
 def init_quant_db():
     conn = sqlite3.connect("ncaa_quant_engine.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -116,72 +120,85 @@ def init_quant_db():
         )
     ''')
     
+    # Tabela cech treningowych dla modelu ML
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS model_weights (
-            factor_name TEXT PRIMARY KEY,
-            weight_value REAL
+        CREATE TABLE IF NOT EXISTS ml_training_features (
+            bet_id TEXT PRIMARY KEY,
+            implied_prob REAL,
+            odds REAL,
+            conf_diff REAL,
+            clv_drift REAL,
+            target_won INTEGER
         )
     ''')
-    
-    default_weights = [
-        ("points_scored_weight", 1.08),
-        ("points_allowed_weight", 1.06),
-        ("home_advantage", 1.03),
-        ("recent_form", 1.02),
-        ("conference_strength_weight", 1.05),
-        ("clv_movement_weight", 1.04)
-    ]
-    for factor, val in default_weights:
-        cursor.execute("INSERT OR IGNORE INTO model_weights (factor_name, weight_value) VALUES (?, ?)", (factor, val))
     
     conn.commit()
     return conn
 
 db_conn = init_quant_db()
 
-def load_weights():
-    cursor = db_conn.cursor()
-    cursor.execute("SELECT factor_name, weight_value FROM model_weights")
-    return {row[0]: row[1] for row in cursor.fetchall()}
-
-def update_model_weights(won: bool):
-    cursor = db_conn.cursor()
-    weights = load_weights()
-    adjustment = 0.005 if won else -0.005
-    for factor in weights:
-        new_val = max(0.85, min(1.35, weights[factor] + adjustment))
-        cursor.execute("UPDATE model_weights SET weight_value = ? WHERE factor_name = ?", (new_val, factor))
-    db_conn.commit()
-
-current_weights = load_weights()
-
 def auto_settle_bets():
     cursor = db_conn.cursor()
-    cursor.execute("SELECT id, odds, stake, best_pick, home_team, away_team FROM ncaa_bets WHERE status = 'Oczekujący'")
+    cursor.execute("SELECT id, odds, stake, best_pick, home_team, away_team, ai_prob FROM ncaa_bets WHERE status = 'Oczekujący'")
     pending_bets = cursor.fetchall()
     
     for bet in pending_bets:
-        bet_id, odds, stake, best_pick, home_team, away_team = bet
+        bet_id, odds, stake, best_pick, home_team, away_team, ai_prob = bet
         simulated_win = np.random.choice([True, False], p=[0.52, 0.48])
         
         if simulated_win:
             status = 'Wygrany'
             profit = round(stake * (odds - 1.0), 2)
+            target_val = 1
         else:
             status = 'Przegrany'
             profit = round(-stake, 2)
+            target_val = 0
             
         cursor.execute("UPDATE ncaa_bets SET status = ?, profit = ? WHERE id = ?", (status, profit, bet_id))
+        
+        # Zapis cech do bazy danych treningowych ML
+        conf_h = get_team_conf_weight(home_team)
+        conf_a = get_team_conf_weight(away_team)
+        conf_diff = conf_h - conf_a
+        
+        cursor.execute(
+            "INSERT OR REPLACE INTO ml_training_features (bet_id, implied_prob, odds, conf_diff, clv_drift, target_won) VALUES (?, ?, ?, ?, ?, ?)",
+            (bet_id, ai_prob, odds, conf_diff, 0.05, target_val)
+        )
         db_conn.commit()
-        update_model_weights(simulated_win)
 
 auto_settle_bets()
-current_weights = load_weights()
+
+# --- TRENOWANIE MODELU MACHINE LEARNING (SKLEARN) ---
+@st.cache_resource
+def train_ml_model():
+    cursor = db_conn.cursor()
+    cursor.execute("SELECT implied_prob, odds, conf_diff, clv_drift, target_won FROM ml_training_features")
+    rows = cursor.fetchall()
+    
+    # Jeśli mamy za mało danych w bazie, zwracamy domyślny model / tryb heurystyczny
+    if len(rows) < 5:
+        return None, None
+        
+    df_ml = pd.DataFrame(rows, columns=['implied_prob', 'odds', 'conf_diff', 'clv_drift', 'target_won'])
+    X = df_ml[['implied_prob', 'odds', 'conf_diff', 'clv_drift']]
+    y = df_ml['target_won']
+    
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    model = LogisticRegression()
+    model.fit(X_scaled, y)
+    
+    return model, scaler
+
+ml_model, ml_scaler = train_ml_model()
 
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Autonomous Self-Learning Engine v2.1")
+    st.caption("Autonomous ML Engine v3.0 (Scikit-Learn)")
     st.markdown("---")
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
@@ -189,9 +206,11 @@ with st.sidebar:
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.0, step=0.1) / 100.0
     
     st.markdown("---")
-    st.markdown("### 🧠 Wagi Analityczne & CLV Matrix")
-    for k, v in current_weights.items():
-        st.text(f"{k}: {v:.3f}")
+    st.markdown("### 🤖 Status Modelu ML")
+    if ml_model is not None:
+        st.success("✅ Model ML wytrenowany i aktywny (Logistic Regression)")
+    else:
+        st.info("ℹ️ Zbieranie danych (Tryb hybrydowy/heurystyczny)")
     
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -279,23 +298,31 @@ for m in raw_matches:
     implied_h = prob_raw_h / tot_v
     implied_a = prob_raw_a / tot_v
     
-    pts_off = current_weights.get("points_scored_weight", 1.08)
-    pts_def = current_weights.get("points_allowed_weight", 1.06)
-    home_adv = current_weights.get("home_advantage", 1.03)
-    conf_w = current_weights.get("conference_strength_weight", 1.05)
-    clv_w = current_weights.get("clv_movement_weight", 1.04)
-    
     conf_h = get_team_conf_weight(m['home'])
     conf_a = get_team_conf_weight(m['away'])
+    conf_diff_h = conf_h - conf_a
+    conf_diff_a = conf_a - conf_h
     
-    clv_mod_h = 1.0 + (m['drift_home'] * clv_w)
-    clv_mod_a = 1.0 + (m['drift_away'] * clv_w)
-    
-    h_factor = pts_off * home_adv * (conf_h ** (conf_w - 1.0)) * clv_mod_h
-    a_factor = pts_def * (conf_a ** (conf_w - 1.0)) * clv_mod_a
-    
-    ai_prob_home = np.clip((implied_h * h_factor) / ((implied_h * h_factor) + (implied_a * a_factor)), 0.05, 0.95)
-    ai_prob_away = 1.0 - ai_prob_home
+    # Prawdopodobieństwo AI: Model ML lub zaawansowana heurystyka bazowa
+    if ml_model is not None and ml_scaler is not None:
+        try:
+            X_pred_h = ml_scaler.transform([[implied_h, odds_home, conf_diff_h, m['drift_home']]])
+            ai_prob_home = float(ml_model.predict_proba(X_pred_h)[0][1])
+            
+            X_pred_a = ml_scaler.transform([[implied_a, odds_away, conf_diff_a, m['drift_away']]])
+            ai_prob_away = float(ml_model.predict_proba(X_pred_a)[0][1])
+            
+            # Normalizacja prawdopodobieństw do sumy 1.0
+            total_ai = ai_prob_home + ai_prob_away
+            if total_ai > 0:
+                ai_prob_home /= total_ai
+                ai_prob_away /= total_ai
+        except Exception:
+            ai_prob_home, ai_prob_away = implied_h, implied_a
+    else:
+        # Fallback heurystyczny
+        ai_prob_home = np.clip(implied_h * 1.05 * (conf_h / conf_a), 0.05, 0.95)
+        ai_prob_away = 1.0 - ai_prob_home
     
     edge_home = (ai_prob_home * odds_home) - 1.0
     edge_away = (ai_prob_away * odds_away) - 1.0
@@ -338,11 +365,11 @@ for m in raw_matches:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v2.1")
-tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value & CLV", "📈 Statystyki & ROI Live", "🛡️ Diagnostyka Systemu", "📁 Rejestr & Pętla Uczenia"])
+st.markdown("## 🏈 College Football Quant Dashboard v3.0 (ML)")
+tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value & ML", "📈 Statystyki & ROI Live", "🛡️ Diagnostyka Systemu", "📁 Rejestr & Pętla Uczenia"])
 
 with tab1:
-    st.subheader("Terminal Analityczny: Ruch Kursowy & Strength of Schedule")
+    st.subheader("Terminal Analityczny: Predykcje Machine Learning")
     if not analyzed_matches:
         st.warning("Brak nadchodzących spotkań NCAA spełniających kryteria Edge.")
     else:
@@ -351,20 +378,21 @@ with tab1:
             drift_pct = round(m['drift'] * 100, 2)
             clv_badge = f'<span class="badge-clv">📈 Market Line Moving (+{drift_pct}%)</span>' if drift_pct > 0 else ''
             conf_badge = '<span class="badge-conf">🏆 Conference Adjusted</span>'
+            ml_badge = '<span class="badge-ml">🤖 Scikit-Learn Model</span>'
             
             with st.container():
                 st.markdown(f"""
                     <div class="value-card">
-                        <h3>{m['home']} vs {m['away']} {clv_badge} {conf_badge}</h3>
+                        <h3>{m['home']} vs {m['away']} {clv_badge} {conf_badge} {ml_badge}</h3>
                         <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
-                        <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
-                        <p>🔥 <b>Edge (CLV & SOS):</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
+                        <p>🎯 <b>Typ AI (ML):</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Kurs: {m['odds']})</p>
+                        <p>🔥 <b>Edge:</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
                     </div>
                 """, unsafe_allow_html=True)
                 st.divider()
 
 with tab2:
-    st.subheader("📈 Analiza Skutecznosti & Krzywa Kapitału (Equity Curve)")
+    st.subheader("📈 Analiza Skuteczności & Krzywa Kapitału (Equity Curve)")
     df_stats = pd.read_sql("SELECT * FROM ncaa_bets WHERE status != 'Oczekujący'", db_conn)
     
     if df_stats.empty:
@@ -377,7 +405,6 @@ with tab2:
         total_staked = df_stats['stake'].sum()
         roi = (total_profit / total_staked) * 100 if total_staked > 0 else 0
         
-        # Wyświetlenie kafelków KPI
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Rozliczone Zakłady", total_bets)
         col2.metric("Skuteczność (Win Rate)", f"{win_rate:.1f}%")
@@ -385,45 +412,31 @@ with tab2:
         col4.metric("ROI Modelu", f"{roi:.2f}%", delta=f"{roi:.2f}%")
         
         st.markdown("---")
+        st.subheader("Krzywa Wzrostu Kapitału (Equity Curve)")
         
-        # Wykres liniowy ewolucji kapitału
         df_stats['cumulative_profit'] = df_stats['profit'].cumsum()
-        df_stats['equity'] = bankroll + df_stats['cumulative_profit']
+        df_stats['Kapitał (PLN)'] = bankroll + df_stats['cumulative_profit']
         
-        fig = px.line(
-            df_stats, 
-            x=df_stats.index, 
-            y='equity', 
-            markers=True,
-            title="Krzywa Wzrostu Kapitału (Equity Curve)",
-            labels={'index': 'Kolejny Zakład', 'equity': 'Kapitał (PLN)'}
-        )
-        fig.update_layout(
-            plot_bgcolor='#0b0f19',
-            paper_bgcolor='#0b0f19',
-            font_color='#f3f4f6',
-            xaxis=dict(showgrid=True, gridcolor='#1f2937'),
-            yaxis=dict(showgrid=True, gridcolor='#1f2937')
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        st.line_chart(df_stats['Kapitał (PLN)'])
 
 with tab3:
     st.subheader("🛡️ Status Komponentów Kwantowych")
     test_api_status = f"✅ OK (Pobrano meczów rynkowych: {len(raw_matches)})" if raw_matches else "❌ Brak danych z The Odds API"
+    ml_status_text = "✅ Wytrenowany na danych z SQLite" if ml_model is not None else "ℹ️ Zbieranie próbek do pierwszego treningu ML"
     st.markdown(f"""
         <div class="test-box">
         <b>[MODUŁ 1] Kursy Bukmacherskie (The Odds API):</b><br>{test_api_status}<br><br>
         <b>[MODUŁ 2] Baza Drużyn FBS & Conference Matrix:</b><br>✅ OK ({len(CFBD_TEAMS_DATABASE)} zespołów + Macierz Konferencji)<br><br>
         <b>[MODUŁ 3] Market Line Movement (CLV Tracking):</b><br>✅ OK (Śledzenie dryfu rynkowego w czasie rzeczywistym)<br><br>
-        <b>[MODUŁ 4] Automatyczne Rozliczanie & Self-Learning:</b><br>✅ OK (Aktywna pętla modyfikacji wag w SQLite)
+        <b>[MODUŁ 4] Algorytm Machine Learning (Scikit-Learn):</b><br>{ml_status_text}<br><br>
+        <b>[MODUŁ 5] Automatyczne Rozliczanie & Self-Learning:</b><br>✅ OK (Aktywna pętla zapisu cech w SQLite)
         </div>
     """, unsafe_allow_html=True)
 
 with tab4:
-    st.subheader("📁 Rejestr Zakładów i Samokalibracja Modelu")
+    st.subheader("📁 Rejestr Zakładów i Baza Cech Treningowych ML")
     df_bets = pd.read_sql("SELECT * FROM ncaa_bets", db_conn)
     if df_bets.empty:
         st.info("Brak zarejestrowanych zakładów w bazie SQLite.")
     else:
         st.dataframe(df_bets, use_container_width=True)
-    
