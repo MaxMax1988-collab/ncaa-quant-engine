@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from rapidfuzz import process, fuzz
 
 # Importy Machine Learning (Scikit-Learn)
@@ -120,7 +120,6 @@ def init_quant_db():
         )
     ''')
     
-    # Tabela cech treningowych dla modelu ML
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ml_training_features (
             bet_id TEXT PRIMARY KEY,
@@ -157,7 +156,6 @@ def auto_settle_bets():
             
         cursor.execute("UPDATE ncaa_bets SET status = ?, profit = ? WHERE id = ?", (status, profit, bet_id))
         
-        # Zapis cech do bazy danych treningowych ML
         conf_h = get_team_conf_weight(home_team)
         conf_a = get_team_conf_weight(away_team)
         conf_diff = conf_h - conf_a
@@ -177,7 +175,6 @@ def train_ml_model():
     cursor.execute("SELECT implied_prob, odds, conf_diff, clv_drift, target_won FROM ml_training_features")
     rows = cursor.fetchall()
     
-    # Jeśli mamy za mało danych w bazie, zwracamy domyślny model / tryb heurystyczny
     if len(rows) < 5:
         return None, None
         
@@ -203,7 +200,7 @@ with st.sidebar:
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.0, step=0.1) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=3.0, step=0.1) / 100.0
     
     st.markdown("---")
     st.markdown("### 🤖 Status Modelu ML")
@@ -218,19 +215,32 @@ with st.sidebar:
     total_tracked = cursor.fetchone()[0]
     st.metric("Wszystkie Sygnały w Bazie", total_tracked)
 
-# --- POBIERANIE KURSÓW I MARKET MOVEMENT ---
+# --- POBIERANIE KURSÓW I MARKET MOVEMENT (Z FILTREM CZASU DO 48H) ---
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_ncaa_odds():
     url = f"{ODDS_BASE_URL}/americanfootball_ncaaf/odds"
     params = {"apiKey": ODDS_API_KEY, "regions": "us,eu", "markets": "h2h", "oddsFormat": "decimal"}
     all_m = []
     cursor = db_conn.cursor()
+    
+    now_utc = datetime.now(timezone.utc)
+    max_future_time = now_utc + timedelta(hours=48)  # Tylko mecze w najbliższych 48 godzinach
+    
     try:
         res = requests.get(url, params=params, timeout=10)
         if res.status_code == 200:
             for match in res.json():
-                match_id = str(match.get('id'))
                 commence = match.get('commence_time')
+                if commence:
+                    try:
+                        match_time = datetime.fromisoformat(commence.replace('Z', '+00:00'))
+                        # Jeśli mecz jest w przeszłości lub dalej niż za 48h, pomijamy go
+                        if match_time < now_utc or match_time > max_future_time:
+                            continue
+                    except Exception:
+                        pass
+                
+                match_id = str(match.get('id'))
                 raw_home = match.get('home_team')
                 raw_away = match.get('away_team')
                 
@@ -303,7 +313,6 @@ for m in raw_matches:
     conf_diff_h = conf_h - conf_a
     conf_diff_a = conf_a - conf_h
     
-    # Prawdopodobieństwo AI: Model ML lub zaawansowana heurystyka bazowa
     if ml_model is not None and ml_scaler is not None:
         try:
             X_pred_h = ml_scaler.transform([[implied_h, odds_home, conf_diff_h, m['drift_home']]])
@@ -312,7 +321,6 @@ for m in raw_matches:
             X_pred_a = ml_scaler.transform([[implied_a, odds_away, conf_diff_a, m['drift_away']]])
             ai_prob_away = float(ml_model.predict_proba(X_pred_a)[0][1])
             
-            # Normalizacja prawdopodobieństw do sumy 1.0
             total_ai = ai_prob_home + ai_prob_away
             if total_ai > 0:
                 ai_prob_home /= total_ai
@@ -320,7 +328,6 @@ for m in raw_matches:
         except Exception:
             ai_prob_home, ai_prob_away = implied_h, implied_a
     else:
-        # Fallback heurystyczny
         ai_prob_home = np.clip(implied_h * 1.05 * (conf_h / conf_a), 0.05, 0.95)
         ai_prob_away = 1.0 - ai_prob_home
     
@@ -369,9 +376,9 @@ st.markdown("## 🏈 College Football Quant Dashboard v3.0 (ML)")
 tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value & ML", "📈 Statystyki & ROI Live", "🛡️ Diagnostyka Systemu", "📁 Rejestr & Pętla Uczenia"])
 
 with tab1:
-    st.subheader("Terminal Analityczny: Predykcje Machine Learning")
+    st.subheader("Terminal Analityczny: Najbliższe Spotkania (48h)")
     if not analyzed_matches:
-        st.warning("Brak nadchodzących spotkań NCAA spełniających kryteria Edge.")
+        st.warning("Brak nadchodzących spotkań NCAA w najbliższych 48 godzinach spełniających kryteria Edge.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
@@ -421,13 +428,13 @@ with tab2:
 
 with tab3:
     st.subheader("🛡️ Status Komponentów Kwantowych")
-    test_api_status = f"✅ OK (Pobrano meczów rynkowych: {len(raw_matches)})" if raw_matches else "❌ Brak danych z The Odds API"
+    test_api_status = f"✅ OK (Pobrano meczów rynkowych (48h): {len(raw_matches)})" if raw_matches else "❌ Brak meczów w najbliższych 48h"
     ml_status_text = "✅ Wytrenowany na danych z SQLite" if ml_model is not None else "ℹ️ Zbieranie próbek do pierwszego treningu ML"
     st.markdown(f"""
         <div class="test-box">
-        <b>[MODUŁ 1] Kursy Bukmacherskie (The Odds API):</b><br>{test_api_status}<br><br>
+        <b>[MODUŁ 1] Kursy Bukmacherskie (The Odds API - 48h Filter):</b><br>{test_api_status}<br><br>
         <b>[MODUŁ 2] Baza Drużyn FBS & Conference Matrix:</b><br>✅ OK ({len(CFBD_TEAMS_DATABASE)} zespołów + Macierz Konferencji)<br><br>
-         <b>[MODUŁ 3] Market Line Movement (CLV Tracking):</b><br>✅ OK (Śledzenie dryfu rynkowego w czasie rzeczywistym)<br><br>
+        <b>[MODUŁ 3] Market Line Movement (CLV Tracking):</b><br>✅ OK (Śledzenie dryfu rynkowego w czasie rzeczywistym)<br><br>
         <b>[MODUŁ 4] Algorytm Machine Learning (Scikit-Learn):</b><br>{ml_status_text}<br><br>
         <b>[MODUŁ 5] Automatyczne Rozliczanie & Self-Learning:</b><br>✅ OK (Aktywna pętla zapisu cech w SQLite)
         </div>
