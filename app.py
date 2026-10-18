@@ -120,7 +120,6 @@ def init_quant_db():
         )
     ''')
     
-    # Tabela cech treningowych dla modelu ML
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ml_training_features (
             bet_id TEXT PRIMARY KEY,
@@ -133,6 +132,24 @@ def init_quant_db():
     ''')
     
     conn.commit()
+    
+    # AUTOMATYCZNY BACKFILL: Jeśli tabela cech jest pusta, a mamy już rozliczone zakłady, uzupełnij je
+    cursor.execute("SELECT COUNT(*) FROM ml_training_features")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("SELECT id, odds, ai_prob, home_team, away_team, status FROM ncaa_bets WHERE status != 'Oczekujący'")
+        settled = cursor.fetchall()
+        for s in settled:
+            b_id, odds, ai_p, h_t, a_t, stat = s
+            t_val = 1 if stat == 'Wygrany' else 0
+            c_h = get_team_conf_weight(h_t)
+            c_a = get_team_conf_weight(a_t)
+            c_diff = c_h - c_a
+            cursor.execute(
+                "INSERT OR IGNORE INTO ml_training_features (bet_id, implied_prob, odds, conf_diff, clv_drift, target_won) VALUES (?, ?, ?, ?, ?, ?)",
+                (b_id, ai_p, odds, c_diff, 0.05, t_val)
+            )
+        conn.commit()
+        
     return conn
 
 db_conn = init_quant_db()
@@ -157,7 +174,6 @@ def auto_settle_bets():
             
         cursor.execute("UPDATE ncaa_bets SET status = ?, profit = ? WHERE id = ?", (status, profit, bet_id))
         
-        # Zapis cech do bazy danych treningowych ML
         conf_h = get_team_conf_weight(home_team)
         conf_a = get_team_conf_weight(away_team)
         conf_diff = conf_h - conf_a
@@ -177,8 +193,7 @@ def train_ml_model():
     cursor.execute("SELECT implied_prob, odds, conf_diff, clv_drift, target_won FROM ml_training_features")
     rows = cursor.fetchall()
     
-    # Jeśli mamy za mało danych w bazie, zwracamy domyślny model / tryb heurystyczny
-    if len(rows) < 5:
+    if len(rows) < 3:
         return None, None
         
     df_ml = pd.DataFrame(rows, columns=['implied_prob', 'odds', 'conf_diff', 'clv_drift', 'target_won'])
@@ -203,14 +218,19 @@ with st.sidebar:
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.0, step=0.1) / 100.0
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=3.0, step=0.1) / 100.0
     
     st.markdown("---")
     st.markdown("### 🤖 Status Modelu ML")
     if ml_model is not None:
-        st.success("✅ Model ML wytrenowany i aktywny (Logistic Regression)")
+        st.success("✅ Model ML wytrenowany i aktywny")
+        st.markdown("#### 🧠 Wagi Współczynników (Coefficients)")
+        feature_names = ['Implied Prob', 'Kurs (Odds)', 'Różnica Konf.', 'CLV Drift']
+        coefs = ml_model.coef_[0]
+        for name, coef in zip(feature_names, coefs):
+            st.text(f"{name}: {coef:.4f}")
     else:
-        st.info("ℹ️ Zbieranie danych (Tryb hybrydowy/heurystyczny)")
+        st.info("ℹ️ Zbieranie danych (Tryb hybrydowy)")
     
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -303,7 +323,6 @@ for m in raw_matches:
     conf_diff_h = conf_h - conf_a
     conf_diff_a = conf_a - conf_h
     
-    # Prawdopodobieństwo AI: Model ML lub zaawansowana heurystyka bazowa
     if ml_model is not None and ml_scaler is not None:
         try:
             X_pred_h = ml_scaler.transform([[implied_h, odds_home, conf_diff_h, m['drift_home']]])
@@ -312,7 +331,6 @@ for m in raw_matches:
             X_pred_a = ml_scaler.transform([[implied_a, odds_away, conf_diff_a, m['drift_away']]])
             ai_prob_away = float(ml_model.predict_proba(X_pred_a)[0][1])
             
-            # Normalizacja prawdopodobieństw do sumy 1.0
             total_ai = ai_prob_home + ai_prob_away
             if total_ai > 0:
                 ai_prob_home /= total_ai
@@ -320,7 +338,6 @@ for m in raw_matches:
         except Exception:
             ai_prob_home, ai_prob_away = implied_h, implied_a
     else:
-        # Fallback heurystyczny
         ai_prob_home = np.clip(implied_h * 1.05 * (conf_h / conf_a), 0.05, 0.95)
         ai_prob_away = 1.0 - ai_prob_home
     
@@ -422,7 +439,7 @@ with tab2:
 with tab3:
     st.subheader("🛡️ Status Komponentów Kwantowych")
     test_api_status = f"✅ OK (Pobrano meczów rynkowych: {len(raw_matches)})" if raw_matches else "❌ Brak danych z The Odds API"
-    ml_status_text = "✅ Wytrenowany na danych z SQLite" if ml_model is not None else "ℹ️ Zbieranie próbek do pierwszego treningu ML"
+    ml_status_text = "✅ Wytrenowany i aktywny na danych historycznych SQLite" if ml_model is not None else "ℹ️ Oczekiwanie na minimum 3 próbki"
     st.markdown(f"""
         <div class="test-box">
         <b>[MODUŁ 1] Kursy Bukmacherskie (The Odds API):</b><br>{test_api_status}<br><br>
