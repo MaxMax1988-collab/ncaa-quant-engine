@@ -431,7 +431,7 @@ with tab2:
         
         st.line_chart(df_stats['Kapitał (PLN)'])
 
- with tab3:
+with tab3:
     st.subheader("🛡️ Status Komponentów Kwantowych")
     test_api_status = f"✅ OK (Pobrano meczów rynkowych (48h): {len(raw_matches)})" if raw_matches else "❌ Brak meczów w najbliższych 48h"
     ml_status_text = "✅ Wytrenowany na danych z SQLite" if ml_model is not None else "ℹ️ Zbieranie próbek do pierwszego treningu ML"
