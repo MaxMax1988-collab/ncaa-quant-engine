@@ -372,10 +372,20 @@ with tab3:
         </div>
     """, unsafe_allow_html=True)
 
+    st.markdown("---")
+    st.markdown("### ⚠️ Strefa Zarządzania Historią")
+    if st.button("🗑️ Wyzeruj historię zakładów i statystyki"):
+        cursor.execute("DELETE FROM ncaa_bets")
+        db_conn.commit()
+        st.success("Historia zakładów została wyzerowana! Statystyki i krzywa kapitału zaczynają od nowa.")
+        st.rerun()
+
 with tab4:
     st.subheader("📁 Rejestr Zakładów i Tabela Power Ratings Drużyn")
     df_bets = pd.read_sql("SELECT * FROM ncaa_bets", db_conn)
-    if not df_bets.empty:
+    if df_bets.empty:
+        st.info("Brak zarejestrowanych zakładów w bazie (stan czysty).")
+    else:
         st.markdown("### Ostatnie Sygnały")
         st.dataframe(df_bets, use_container_width=True)
     
@@ -383,3 +393,4 @@ with tab4:
     st.markdown("### Aktualne Power Ratings drużyn w bazie")
     df_ratings = pd.read_sql("SELECT * FROM team_power_ratings ORDER BY rating DESC", db_conn)
     st.dataframe(df_ratings, use_container_width=True)
+    
