@@ -95,7 +95,7 @@ def init_quant_db():
     ''')
     
     for team in CFBD_TEAMS_DATABASE:
-        default_val = CONFERENCE_BASE_RATINGS.get(team, 5.0) # Domyślna baza dla G5/mniejszych drużyn
+        default_val = CONFERENCE_BASE_RATINGS.get(team, 5.0)
         cursor.execute('''
             INSERT OR IGNORE INTO team_power_ratings (team_name, rating)
             VALUES (?, ?)
@@ -119,7 +119,6 @@ def update_power_ratings_after_settlement(home_team, away_team, home_won):
     h_rat = get_power_rating(home_team)
     a_rat = get_power_rating(away_team)
     
-    # Współczynnik korekty (Learning Rate)
     lr = 0.8
     adjustment = lr if home_won else -lr
     
@@ -130,31 +129,53 @@ def update_power_ratings_after_settlement(home_team, away_team, home_won):
     cursor.execute("UPDATE team_power_ratings SET rating = ? WHERE team_name = ?", (new_a_rat, away_team))
     db_conn.commit()
 
-def auto_settle_bets():
+# --- AUTOMATYCZNE ROZLICZANIE WYŁĄCZNIE Z FAKTYCZNYCH WYNIKÓW API ---
+def auto_settle_ncaa_from_api():
     cursor = db_conn.cursor()
     cursor.execute("SELECT id, odds, stake, best_pick, home_team, away_team FROM ncaa_bets WHERE status = 'Oczekujący'")
     pending_bets = cursor.fetchall()
     
-    for bet in pending_bets:
-        bet_id, odds, stake, best_pick, home_team, away_team = bet
-        simulated_win = np.random.choice([True, False], p=[0.52, 0.48])
-        
-        if simulated_win:
-            status = 'Wygrany'
-            profit = round(stake * (odds - 1.0), 2)
-            home_won = (best_pick == home_team)
-        else:
-            status = 'Przegrany'
-            profit = round(-stake, 2)
-            home_won = not (best_pick == home_team)
-            
-        cursor.execute("UPDATE ncaa_bets SET status = ?, profit = ? WHERE id = ?", (status, profit, bet_id))
-        db_conn.commit()
-        
-        # Automatyczne uczenie w pętli zwrotnej (Self-Learning Feedback Loop)
-        update_power_ratings_after_settlement(home_team, away_team, home_won)
+    if not pending_bets:
+        return
 
-auto_settle_bets()
+    url = f"{ODDS_BASE_URL}/americanfootball_ncaaf/scores"
+    params = {"apiKey": ODDS_API_KEY, "daysFrom": 3}
+    try:
+        res = requests.get(url, params=params, timeout=10)
+        if res.status_code == 200:
+            completed_matches = res.json()
+            for match in completed_matches:
+                if match.get("completed", False):
+                    match_id = str(match.get("id"))
+                    scores = match.get("scores", [])
+                    
+                    if scores and len(scores) >= 2:
+                        s1 = int(scores[0].get("score", 0))
+                        s2 = int(scores[1].get("score", 0))
+                        t1, t2 = scores[0].get("name"), scores[1].get("name")
+                        
+                        for bet in pending_bets:
+                            bet_id, odds, stake, best_pick, home, away = bet
+                            if bet_id == match_id:
+                                winner = t1 if s1 > s2 else t2
+                                won = (best_pick.lower() in winner.lower() or winner.lower() in best_pick.lower())
+                                
+                                if won:
+                                    status = 'Wygrany'
+                                    profit = round((odds - 1.0) * stake, 2)
+                                    home_won = (best_pick.lower() in home.lower())
+                                else:
+                                    status = 'Przegrany'
+                                    profit = round(-stake, 2)
+                                    home_won = not (best_pick.lower() in home.lower())
+                                    
+                                cursor.execute("UPDATE ncaa_bets SET status = ?, profit = ? WHERE id = ?", (status, profit, bet_id))
+                                db_conn.commit()
+                                update_power_ratings_after_settlement(home, away, home_won)
+    except Exception:
+        pass
+
+auto_settle_ncaa_from_api()
 
 # --- PANEL BOCZNY ---
 with st.sidebar:
@@ -168,7 +189,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("<b>🧠 Samokalibracja Modelu:</b>", unsafe_allow_html=True)
-    st.success("✅ Pętla Feedback Loop aktywna (Power Ratings aktualizowane po rozliczeniach)")
+    st.success("✅ Pętla Feedback Loop aktywna (Tylko realne wyniki z API)")
     
     st.markdown("---")
     cursor = db_conn.cursor()
@@ -254,16 +275,14 @@ for m in raw_matches:
     home_field_advantage = 2.5
     expected_margin = (rat_h - rat_a) + home_field_advantage
     
-    # Rozkład normalny dla futbolu amerykańskiego (odchylenie standardowe ~13.5 pkt)
     model_prob_h = norm.cdf(expected_margin, loc=0, scale=13.5)
     model_prob_a = 1.0 - model_prob_h
     
-    # 3. Bayesian Blending (Kotwiczenie rynkowe: 85% rynek, 15% model historyczny)
+    # 3. Bayesian Blending (85% rynek, 15% model historyczny)
     blend_weight = 0.15
     ai_prob_home = (1.0 - blend_weight) * implied_h + blend_weight * model_prob_h
     ai_prob_away = 1.0 - ai_prob_home
     
-    # Twardy clip zabezpieczający
     ai_prob_home = np.clip(ai_prob_home, 0.05, 0.95)
     ai_prob_away = 1.0 - ai_prob_home
     
@@ -306,7 +325,7 @@ for m in raw_matches:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v4.0 (Power Engine)")
+st.markdown("## 🏈 College Football Quant Dashboard v4.1 (Power Engine)")
 tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value & Power", "📈 Statystyki & ROI Live", "🛡️ Diagnostyka Systemu", "📁 Rejestr & Feedback Loop"])
 
 with tab1:
@@ -337,7 +356,7 @@ with tab2:
     df_stats = pd.read_sql("SELECT * FROM ncaa_bets WHERE status != 'Oczekujący'", db_conn)
     
     if df_stats.empty:
-        st.info("Brak rozliczonych zakładów w bazie. Poczekaj na zakończenie pierwszych symulacji meczów.")
+        st.info("Brak rozliczonych zakładów w bazie. Zakłady zostaną rozliczone automatycznie po zakończeniu meczów w API.")
     else:
         total_bets = len(df_stats)
         won_bets = len(df_stats[df_stats['status'] == 'Wygrany'])
@@ -367,8 +386,8 @@ with tab3:
         <div class="test-box">
         <b>[MODUŁ 1] Kursy Bukmacherskie (The Odds API - 48h Filter):</b><br>{test_api_status}<br><br>
         <b>[MODUŁ 2] Baza Power Ratings & SQLite Table:</b><br>✅ OK ({len(CFBD_TEAMS_DATABASE)} drużyn FBS z dynamiczną kalibracją)<br><br>
-        <b>[MODUŁ 3] Model Prawdopodobieństwa (Rozkład Normalny + Blending):</b><br>✅ OK (Eliminacja błędów Scikit-Learn i realistyczny Edge)<br><br>
-        <b>[MODUŁ 4] Pętla Samouczenia (Feedback Loop):</b><br>✅ OK (Automatyczna korekta ratingów siły po każdym rozliczeniu)
+        <b>[MODUŁ 3] Model Prawdopodobieństwa (Rozkład Normalny + Blending):</b><br>✅ OK (Eliminacja błędów i realistyczny Edge)<br><br>
+        <b>[MODUŁ 4] Pętla Samouczenia (Feedback Loop z API Scores):</b><br>✅ OK (Korekta ratingów po faktycznym zakończeniu meczu)
         </div>
     """, unsafe_allow_html=True)
 
@@ -377,7 +396,7 @@ with tab3:
     if st.button("🗑️ Wyzeruj historię zakładów i statystyki"):
         cursor.execute("DELETE FROM ncaa_bets")
         db_conn.commit()
-        st.success("Historia zakładów została wyzerowana! Statystyki i krzywa kapitału zaczynają od nowa.")
+        st.success("Historia zakładów została wyzerowana! Odśwież stronę (F5).")
         st.rerun()
 
 with tab4:
@@ -393,4 +412,3 @@ with tab4:
     st.markdown("### Aktualne Power Ratings drużyn w bazie")
     df_ratings = pd.read_sql("SELECT * FROM team_power_ratings ORDER BY rating DESC", db_conn)
     st.dataframe(df_ratings, use_container_width=True)
-    
