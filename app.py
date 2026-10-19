@@ -224,7 +224,7 @@ def fetch_ncaa_odds():
     cursor = db_conn.cursor()
     
     now_utc = datetime.now(timezone.utc)
-    max_future_time = now_utc + timedelta(hours=48)  # Tylko mecze w najbliższych 48 godzinach
+    max_future_time = now_utc + timedelta(hours=48)
     
     try:
         res = requests.get(url, params=params, timeout=10)
@@ -234,7 +234,6 @@ def fetch_ncaa_odds():
                 if commence:
                     try:
                         match_time = datetime.fromisoformat(commence.replace('Z', '+00:00'))
-                        # Jeśli mecz jest w przeszłości lub dalej niż za 48h, pomijamy go
                         if match_time < now_utc or match_time > max_future_time:
                             continue
                     except Exception:
@@ -328,8 +327,12 @@ for m in raw_matches:
         except Exception:
             ai_prob_home, ai_prob_away = implied_h, implied_a
     else:
-        ai_prob_home = np.clip(implied_h * 1.05 * (conf_h / conf_a), 0.05, 0.95)
+        ai_prob_home = implied_h * (conf_h / conf_a) * 1.02
         ai_prob_away = 1.0 - ai_prob_home
+    
+    # BEZPIECZNE OGRANICZENIE (CLIP) - Zapobiega nierealistycznym Edge > 100%
+    ai_prob_home = np.clip(ai_prob_home, 0.05, 0.90)
+    ai_prob_away = 1.0 - ai_prob_home
     
     edge_home = (ai_prob_home * odds_home) - 1.0
     edge_away = (ai_prob_away * odds_away) - 1.0
@@ -382,6 +385,7 @@ with tab1:
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
+            prob_pct = round(m['ai_prob'] * 100, 1)
             drift_pct = round(m['drift'] * 100, 2)
             clv_badge = f'<span class="badge-clv">📈 Market Line Moving (+{drift_pct}%)</span>' if drift_pct > 0 else ''
             conf_badge = '<span class="badge-conf">🏆 Conference Adjusted</span>'
@@ -396,6 +400,7 @@ with tab1:
                         <p>🔥 <b>Edge:</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
                     </div>
                 """, unsafe_allow_html=True)
+                st.progress(m['ai_prob'], text=f"Rozkład szans AI: {prob_pct}% (Ograniczenie probabilistyczne aktywne)")
                 st.divider()
 
 with tab2:
@@ -426,7 +431,7 @@ with tab2:
         
         st.line_chart(df_stats['Kapitał (PLN)'])
 
-with tab3:
+ with tab3:
     st.subheader("🛡️ Status Komponentów Kwantowych")
     test_api_status = f"✅ OK (Pobrano meczów rynkowych (48h): {len(raw_matches)})" if raw_matches else "❌ Brak meczów w najbliższych 48h"
     ml_status_text = "✅ Wytrenowany na danych z SQLite" if ml_model is not None else "ℹ️ Zbieranie próbek do pierwszego treningu ML"
