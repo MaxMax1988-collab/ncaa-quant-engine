@@ -48,14 +48,13 @@ CFBD_TEAMS_DATABASE = [
     "Sam Houston State", "San Diego State", "San Jose State", "SMU", "South Alabama", "South Carolina", "South Florida", "Southern Miss",
     "Stanford", "Syracuse", "TCU", "Temple", "Tennessee", "Texas", "Texas A&M", "Texas State",
     "Texas Tech", "Toledo", "Troy", "Tulane", "Tulsa", "UAB", "UCF", "UCLA",
-    "UConn", "UMass", "UNLV", "USC", "UTAH", "Utah", "Utah State", "UTEP", "UTSA",
+    "UConn", "UMass", "UNLV", "USC", "Utah", "Utah State", "UTEP", "UTSA",
     "Vanderbilt", "Virginia", "Virginia Tech", "Wake Forest", "Washington", "Washington State", "West Virginia", "Western Kentucky",
     "Western Michigan", "Wisconsin", "Wyoming"
 ]
 
 # CENTRALNY SŁOWNIK MAPOWANIA NAZW BUKMACHERSKICH
 MASTER_CANONICAL_MAP = {
-    # Przykłady z oferty bukmachera
     "FIU Panthers": "FIU",
     "Florida International": "FIU",
     "Florida International Panthers": "FIU",
@@ -122,11 +121,9 @@ def normalize_team_name(team_name_raw, stats_team_list=None, threshold=85):
     
     clean_raw = team_name_raw.strip()
     
-    # 1. Sprawdzenie w Master Canonical Map
     if clean_raw in MASTER_CANONICAL_MAP:
         return MASTER_CANONICAL_MAP[clean_raw]
         
-    # 2. Rygorystyczny matching na liście bez ucinania
     if stats_team_list:
         match_res = process.extractOne(clean_raw, stats_team_list, scorer=fuzz.TokenSortRatio)
         if match_res and match_res[1] >= threshold:
@@ -134,10 +131,14 @@ def normalize_team_name(team_name_raw, stats_team_list=None, threshold=85):
             
     return clean_raw
 
-# --- BAZA DANYCH SQLITE & POWER RATINGS ---
+# --- BAZA DANYCH SQLITE & POWER RATINGS (Z NAPRAWIONĄ INICJALIZACJĄ) ---
 def init_quant_db():
     conn = sqlite3.connect("ncaa_quant_engine.db", check_same_thread=False)
     cursor = conn.cursor()
+    
+    # Bezpieczne usunięcie starych/konfliktowych tabel z poprzednich wersji
+    cursor.execute("DROP TABLE IF EXISTS weights_history;")
+    cursor.execute("DROP TABLE IF EXISTS team_power_ratings;")
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ncaa_bets (
@@ -259,7 +260,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("<b>🧠 Samokalibracja Modelu:</b>", unsafe_allow_html=True)
-    st.success("✅ Master Canonical Map Aktywne (100% spójności z buk/API)")
+    st.success("✅ Master Canonical Map Aktywne")
     
     st.markdown("---")
     cursor = db_conn.cursor()
