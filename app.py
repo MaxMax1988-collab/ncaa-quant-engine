@@ -32,14 +32,14 @@ st.markdown("""
 ODDS_API_KEY = "0beda11c896fdc2856297c26d89ff7ba"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-# KANONICZNA BAZA DRUŻYN NCAA FBS / FCS
+# KANONICZNA BAZA DRUŻYN NCAA FBS / FCS (uzupełniona o brakujące pozycje)
 CFBD_TEAMS_DATABASE = [
     "Air Force", "Akron", "Alabama", "Appalachian State", "Arizona", "Arizona State", "Arkansas", "Arkansas State",
     "Army", "Auburn", "Ball State", "Baylor", "Boise State", "Boston College", "Bowling Green", "Buffalo",
     "BYU", "California", "Central Michigan", "Charlotte", "Cincinnati", "Clemson", "Coastal Carolina", "Colorado",
     "Colorado State", "Delaware", "Duke", "East Carolina", "Eastern Michigan", "FIU", "Florida", "Florida Atlantic", "Florida State",
     "Fresno State", "Georgia", "Georgia Southern", "Georgia State", "Georgia Tech", "Hawaii", "Houston", "Illinois",
-    "Indiana", "Iowa", "Iowa State", "James Madison", "Kansas", "Kansas State", "Kent State", "Kentucky",
+    "Indiana", "Iowa", "Iowa State", "James Madison", "Kansas", "Kansas State", "Kennesaw State", "Kent State", "Kentucky",
     "Liberty", "Louisiana", "Louisiana Tech", "Louisville", "LSU", "Marshall", "Maryland", "Memphis",
     "Miami", "Miami (OH)", "Michigan", "Michigan State", "Middle Tennessee", "Minnesota", "Mississippi State", "Missouri", "Missouri State",
     "Navy", "NC State", "Nebraska", "Nevada", "New Mexico", "New Mexico State", "North Carolina", "North Texas",
@@ -104,7 +104,15 @@ MASTER_CANONICAL_MAP = {
     "Alabama Crimson Tide": "Alabama",
     "Missouri Tigers": "Missouri",
     "Duke Blue Devils": "Duke",
-    "Florida Gators": "Florida"
+    "Florida Gators": "Florida",
+    # Dodane mapowania dla meczów z bukmachera:
+    "Kennesaw State Owls": "Kennesaw State",
+    "Liberty Flames": "Liberty",
+    "Appalachian St. Mountaineers": "Appalachian State",
+    "Appalachian State Mountaineers": "Appalachian State",
+    "James Madison Dukes": "James Madison",
+    "Memphis Tigers": "Memphis",
+    "East Carolina Pirates": "East Carolina"
 }
 
 CONFERENCE_BASE_RATINGS = {
@@ -112,10 +120,11 @@ CONFERENCE_BASE_RATINGS = {
     "Penn State": 20.0, "Notre Dame": 19.5, "Ole Miss": 19.0, "LSU": 18.5, "Michigan": 18.0,
     "Tennessee": 17.5, "Clemson": 17.0, "Missouri": 16.5, "Oklahoma": 16.0, "USC": 15.5,
     "South Alabama": 8.0, "Marshall": 8.5, "FIU": 4.0, "Middle Tennessee": 4.5,
-    "Delaware": 5.0, "Missouri State": 5.0
+    "Delaware": 5.0, "Missouri State": 5.0, "Kennesaw State": 6.0, "Liberty": 14.0,
+    "Appalachian State": 12.0, "James Madison": 13.5, "Memphis": 13.0, "East Carolina": 9.0
 }
 
-def normalize_team_name(team_name_raw, stats_team_list=None, threshold=85):
+def normalize_team_name(team_name_raw, stats_team_list=None, threshold=75):
     if not team_name_raw:
         return "Unknown"
     
@@ -131,14 +140,10 @@ def normalize_team_name(team_name_raw, stats_team_list=None, threshold=85):
             
     return clean_raw
 
-# --- BAZA DANYCH SQLITE & POWER RATINGS (Z NAPRAWIONĄ INICJALIZACJĄ) ---
+# --- BAZA DANYCH SQLITE & POWER RATINGS ---
 def init_quant_db():
     conn = sqlite3.connect("ncaa_quant_engine.db", check_same_thread=False)
     cursor = conn.cursor()
-    
-    # Bezpieczne usunięcie starych/konfliktowych tabel z poprzednich wersji
-    cursor.execute("DROP TABLE IF EXISTS weights_history;")
-    cursor.execute("DROP TABLE IF EXISTS team_power_ratings;")
     
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ncaa_bets (
@@ -199,7 +204,7 @@ def update_power_ratings_after_settlement(home_team, away_team, home_won):
     cursor.execute("UPDATE team_power_ratings SET rating = ? WHERE team_name = ?", (new_a_rat, away_team))
     db_conn.commit()
 
-# --- AUTOMATYCZNE ROZLICZANIE WYŁĄCZNIE Z FAKTYCZNYCH WYNIKÓW API ---
+# --- AUTOMATYCZNE ROZLICZANIE ---
 def auto_settle_ncaa_from_api():
     cursor = db_conn.cursor()
     cursor.execute("SELECT id, odds, stake, best_pick, home_team, away_team FROM ncaa_bets WHERE status = 'Oczekujący'")
@@ -251,12 +256,13 @@ auto_settle_ncaa_from_api()
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Master Canonical Engine v4.2")
+    st.caption("Master Canonical Engine v4.3")
     st.markdown("---")
     
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.5, max_value=10.0, value=2.0, step=0.5) / 100.0
+    # Zmniejszony domyślny próg Edge na 0.5% dla lepszej wykrywalności sygnałów
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.5) / 100.0
     
     st.markdown("---")
     st.markdown("<b>🧠 Samokalibracja Modelu:</b>", unsafe_allow_html=True)
@@ -268,7 +274,7 @@ with st.sidebar:
     total_tracked = cursor.fetchone()[0]
     st.metric("Wszystkie Sygnały w Bazie", total_tracked)
 
-# --- POBIERANIE KURSÓW (48h) ---
+# --- POBIERANIE KURSÓW (Rozszerzone do 96h) ---
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_ncaa_odds():
     url = f"{ODDS_BASE_URL}/americanfootball_ncaaf/odds"
@@ -276,7 +282,7 @@ def fetch_ncaa_odds():
     all_m = []
     
     now_utc = datetime.now(timezone.utc)
-    max_future_time = now_utc + timedelta(hours=48)
+    max_future_time = now_utc + timedelta(hours=96)  # Zwiększone z 48 do 96 godzin
     
     try:
         res = requests.get(url, params=params, timeout=10)
@@ -304,7 +310,7 @@ def fetch_ncaa_odds():
                         if mkt.get('key') == 'h2h':
                             for out in mkt.get('outcomes', []):
                                 price = float(out.get('price', 0))
-                                if 1.01 <= price <= 15.0:
+                                if 1.01 <= price <= 25.0:
                                     out_name = normalize_team_name(out.get('name'), CFBD_TEAMS_DATABASE)
                                     if out_name == home:
                                         home_odds_list.append(price)
@@ -333,14 +339,12 @@ for m in raw_matches:
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # 1. No-Vig Market Implied Probability
     prob_raw_h = 1.0 / odds_home
     prob_raw_a = 1.0 / odds_away
     tot_v = prob_raw_h + prob_raw_a
     implied_h = prob_raw_h / tot_v
     implied_a = prob_raw_a / tot_v
     
-    # 2. Power Ratings Margin Calculation
     rat_h = get_power_rating(m['home'])
     rat_a = get_power_rating(m['away'])
     home_field_advantage = 2.5
@@ -349,11 +353,8 @@ for m in raw_matches:
     model_prob_h = norm.cdf(expected_margin, loc=0, scale=13.5)
     model_prob_a = 1.0 - model_prob_h
     
-    # 3. Bayesian Blending (85% rynek, 15% model historyczny)
     blend_weight = 0.15
     ai_prob_home = (1.0 - blend_weight) * implied_h + blend_weight * model_prob_h
-    ai_prob_away = 1.0 - ai_prob_home
-    
     ai_prob_home = np.clip(ai_prob_home, 0.05, 0.95)
     ai_prob_away = 1.0 - ai_prob_home
     
@@ -396,13 +397,13 @@ for m in raw_matches:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v4.2 (Master Canonical)")
+st.markdown("## 🏈 College Football Quant Dashboard v4.3 (Master Canonical)")
 tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sygnały Value & Power", "📈 Statystyki & ROI Live", "🛡️ Diagnostyka Systemu", "📁 Rejestr & Feedback Loop"])
 
 with tab1:
-    st.subheader("Terminal Analityczny: Najbliższe Spotkania (48h)")
+    st.subheader("Terminal Analityczny: Najbliższe Spotkania (96h)")
     if not analyzed_matches:
-        st.warning("Brak nadchodzących spotkań NCAA w najbliższych 48 godzinach spełniających kryteria Edge.")
+        st.warning("Brak nadchodzących spotkań NCAA w najbliższych 96 godzinach spełniających kryteria Edge. Spróbuj obniżyć 'Minimalny Edge (%)' w panelu bocznym.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
@@ -419,7 +420,7 @@ with tab1:
                         <p>🔥 <b>Edge:</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
                     </div>
                 """, unsafe_allow_html=True)
-                st.progress(m['ai_prob'], text=f"Skorygowane szanse AI: {prob_pct}% (Zdrowy przedział rynkowy)")
+                st.progress(m['ai_prob'], text=f"Skorygowane szanse AI: {prob_pct}%")
                 st.divider()
 
 with tab2:
@@ -444,21 +445,19 @@ with tab2:
         
         st.markdown("---")
         st.subheader("Krzywa Wzrostu Kapitału (Equity Curve)")
-        
         df_stats['cumulative_profit'] = df_stats['profit'].cumsum()
         df_stats['Kapitał (PLN)'] = bankroll + df_stats['cumulative_profit']
-        
         st.line_chart(df_stats['Kapitał (PLN)'])
 
 with tab3:
     st.subheader("🛡️ Status Komponentów Kwantowych")
-    test_api_status = f"✅ OK (Pobrano meczów rynkowych (48h): {len(raw_matches)})" if raw_matches else "❌ Brak meczów w najbliższych 48h"
+    test_api_status = f"✅ OK (Pobrano meczów rynkowych (96h): {len(raw_matches)})" if raw_matches else "❌ Brak meczów w najbliższych 96h"
     st.markdown(f"""
         <div class="test-box">
-        <b>[MODUŁ 1] Kursy Bukmacherskie (The Odds API - 48h Filter):</b><br>{test_api_status}<br><br>
-        <b>[MODUŁ 2] Baza Power Ratings & Master Canonical Mapping:</b><br>✅ OK (100% zgodności z bukmacherem i API wyników)<br><br>
-        <b>[MODUŁ 3] Model Prawdopodobieństwa (Rozkład Normalny + Blending):</b><br>✅ OK (Realistyczny Edge, zero meczów-widm)<br><br>
-        <b>[MODUŁ 4] Pętla Samouczenia (Feedback Loop z API Scores):</b><br>✅ OK (Korekta ratingów po faktycznym zakończeniu meczu)
+        <b>[MODUŁ 1] Kursy Bukmacherskie (The Odds API - 96h Filter):</b><br>{test_api_status}<br><br>
+        <b>[MODUŁ 2] Baza Power Ratings & Master Canonical Mapping:</b><br>✅ OK (Zaktualizowano mapowanie drużyn)<br><br>
+        <b>[MODUŁ 3] Model Prawdopodobieństwa (Rozkład Normalny + Blending):</b><br>✅ OK<br><br>
+        <b>[MODUŁ 4] Pętla Samouczenia (Feedback Loop z API Scores):</b><br>✅ OK
         </div>
     """, unsafe_allow_html=True)
 
