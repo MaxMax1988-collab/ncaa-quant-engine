@@ -4,12 +4,11 @@ import numpy as np
 import requests
 import psycopg2
 from datetime import datetime, timedelta, timezone
-from rapidfuzz import process, fuzz
 from scipy.stats import norm
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.1",
+    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.2",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -60,9 +59,8 @@ def normalize_team_name(team_name_raw):
             return team
     return clean_raw
 
-# --- POŁĄCZENIE Z BAZĄ NEON POSTGRESQL ---
-@st.cache_resource
-def init_cloud_db():
+# --- BEZPIECZNE POŁĄCZENIE Z BAZĄ NEON ---
+def get_db_connection():
     try:
         conn_str = st.secrets["postgres"]["connection_string"]
         conn = psycopg2.connect(conn_str)
@@ -70,13 +68,12 @@ def init_cloud_db():
     except Exception as e:
         return None
 
-db_conn = init_cloud_db()
-
 def setup_database_schema():
-    if not db_conn:
+    conn = get_db_connection()
+    if not conn:
         return
     try:
-        cursor = db_conn.cursor()
+        cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ncaa_bets (
                 id VARCHAR(50) PRIMARY KEY,
@@ -125,28 +122,36 @@ def setup_database_schema():
         
         for team in CFBD_TEAMS_DATABASE:
             cursor.execute('INSERT INTO team_power_ratings (team_name, rating) VALUES (%s, %s) ON CONFLICT (team_name) DO NOTHING;', (team, 10.0))
-        db_conn.commit()
+        conn.commit()
         cursor.close()
+        conn.close()
     except Exception as e:
-        db_conn.rollback()
-        st.error(f"Błąd inicjalizacji bazy: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
 
-if db_conn:
-    setup_database_schema()
+setup_database_schema()
 
 def get_power_rating(team_name):
-    if not db_conn:
+    conn = get_db_connection()
+    if not conn:
         return 10.0
-    cursor = db_conn.cursor()
-    cursor.execute("SELECT rating FROM team_power_ratings WHERE team_name = %s", (team_name,))
-    row = cursor.fetchone()
-    cursor.close()
-    return row[0] if row else 10.0
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT rating FROM team_power_ratings WHERE team_name = %s", (team_name,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return row[0] if row else 10.0
+    except Exception:
+        if conn:
+            conn.close()
+        return 10.0
 
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Master Canonical Engine v6.1 (OddsPapi)")
+    st.caption("Master Canonical Engine v6.2 (OddsPapi)")
     st.markdown("---")
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
@@ -194,7 +199,8 @@ def fetch_oddspapi_data():
 raw_matches, api_status, raw_count = fetch_oddspapi_data()
 analyzed_matches = []
 
-cursor = db_conn.cursor() if db_conn else None
+conn_insert = get_db_connection()
+cursor = conn_insert.cursor() if conn_insert else None
 
 for m in raw_matches:
     match_id = m['id']
@@ -226,17 +232,20 @@ for m in raw_matches:
     
     if best_edge >= min_edge_slider:
         if cursor:
-            cursor.execute("SELECT id FROM ncaa_bets WHERE id = %s", (match_id,))
-            if not cursor.fetchone():
-                cursor.execute(
-                    """
-                    INSERT INTO ncaa_bets (id, date, match_name, odds, ai_prob, edge, stake, status, profit, home_team, away_team, best_pick)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (id) DO NOTHING;
-                    """,
-                    (match_id, datetime.now().strftime("%Y-%m-%d"), match_name, round(best_odds, 2), best_prob, best_edge, stake, 'Oczekujący', 0.0, m['home'], m['away'], best_pick)
-                )
-                db_conn.commit()
+            try:
+                cursor.execute("SELECT id FROM ncaa_bets WHERE id = %s", (match_id,))
+                if not cursor.fetchone():
+                    cursor.execute(
+                        """
+                        INSERT INTO ncaa_bets (id, date, match_name, odds, ai_prob, edge, stake, status, profit, home_team, away_team, best_pick)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (id) DO NOTHING;
+                        """,
+                        (match_id, datetime.now().strftime("%Y-%m-%d"), match_name, round(best_odds, 2), best_prob, best_edge, stake, 'Oczekujący', 0.0, m['home'], m['away'], best_pick)
+                    )
+                    conn_insert.commit()
+            except Exception:
+                conn_insert.rollback()
 
         analyzed_matches.append({
             **m, "best_pick": best_pick, "ai_prob": best_prob, "odds": round(best_odds, 2), 
@@ -245,11 +254,13 @@ for m in raw_matches:
 
 if cursor:
     cursor.close()
+if conn_insert:
+    conn_insert.close()
 
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v6.1 (OddsPapi)")
+st.markdown("## 🏈 College Football Quant Dashboard v6.2 (OddsPapi)")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 Sygnały H2H", "🎯 Spreads", "📈 Statystyki & ROI", "🛡️ Diagnostyka API", "📁 Rejestr w Chmurze"])
 
 with tab1:
@@ -278,8 +289,14 @@ with tab2:
 
 with tab3:
     st.subheader("📈 Analiza Skuteczności & ROI")
-    if db_conn:
-        df_stats = pd.read_sql("SELECT * FROM ncaa_bets WHERE status != 'Oczekujący'", db_conn)
+    conn_stats = get_db_connection()
+    if conn_stats:
+        try:
+            df_stats = pd.read_sql("SELECT * FROM ncaa_bets WHERE status != 'Oczekujący'", conn_stats)
+            conn_stats.close()
+        except Exception:
+            df_stats = pd.DataFrame()
+            conn_stats.close()
     else:
         df_stats = pd.DataFrame()
     
@@ -301,7 +318,15 @@ with tab4:
 
 with tab5:
     st.subheader("📁 Rejestr Bazy Danych w Chmurze")
-    if db_conn:
-        df_bets = pd.read_sql("SELECT * FROM ncaa_bets", db_conn)
-        st.dataframe(df_bets, use_container_width=True)
+    conn_reg = get_db_connection()
+    if conn_reg:
+        try:
+            df_bets = pd.read_sql("SELECT * FROM ncaa_bets", conn_reg)
+            conn_reg.close()
+            st.dataframe(df_bets, use_container_width=True)
+        except Exception as e:
+            conn_reg.close()
+            st.error(f"Błąd odczytu rejestru: {e}")
+    else:
+        st.warning("Brak połączenia z bazą danych.")
         
