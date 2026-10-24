@@ -9,7 +9,7 @@ from scipy.stats import norm
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.0",
+    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.1",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -29,7 +29,6 @@ st.markdown("""
 
 # --- CONFIG API ODDSPAPI ---
 ODDS_API_KEY = "fb92c775-169b-4df2-811a-7932f0355639"
-# Oficjalny endpoint OddsPapi dla futbolu amerykańskiego / NCAA
 ODDPAPI_BASE_URL = "https://api.oddspapi.com/v1/odds"
 
 CFBD_TEAMS_DATABASE = [
@@ -76,57 +75,61 @@ db_conn = init_cloud_db()
 def setup_database_schema():
     if not db_conn:
         return
-    cursor = db_conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ncaa_bets (
-            id VARCHAR(50) PRIMARY KEY,
-            date VARCHAR(20),
-            match_name TEXT,
-            odds REAL,
-            ai_prob REAL,
-            edge REAL,
-            stake REAL,
-            status VARCHAR(20),
-            profit REAL,
-            home_team VARCHAR(100),
-            away_team VARCHAR(100),
-            best_pick VARCHAR(100)
-        );
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ncaa_spread_bets (
-            id VARCHAR(50) PRIMARY KEY,
-            date VARCHAR(20),
-            match_name TEXT,
-            spread_line REAL,
-            odds REAL,
-            edge REAL,
-            stake REAL,
-            status VARCHAR(20),
-            profit REAL,
-            best_pick VARCHAR(100)
-        );
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS team_power_ratings (
-            team_name VARCHAR(100) PRIMARY KEY,
-            rating REAL
-        );
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS model_weights (
-            param_key VARCHAR(50) PRIMARY KEY,
-            param_value REAL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    ''')
-    cursor.execute("INSERT INTO model_weights (param_key, param_value) VALUES ('blend_weight', 0.15) ON CONFLICT (param_key) DO NOTHING;")
-    cursor.execute("INSERT INTO model_weights (param_key, param_value) VALUES ('home_field_advantage', 2.5) ON CONFLICT (param_key) DO NOTHING;")
-    
-    for team in CFBD_TEAMS_DATABASE:
-        cursor.execute('INSERT INTO team_power_ratings (team_name, rating) VALUES (%s, %s) ON CONFLICT (team_name) DO NOTHING;', (team, 10.0))
-    db_conn.commit()
-    cursor.close()
+    try:
+        cursor = db_conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ncaa_bets (
+                id VARCHAR(50) PRIMARY KEY,
+                date VARCHAR(20),
+                match_name TEXT,
+                odds REAL,
+                ai_prob REAL,
+                edge REAL,
+                stake REAL,
+                status VARCHAR(20),
+                profit REAL,
+                home_team VARCHAR(100),
+                away_team VARCHAR(100),
+                best_pick VARCHAR(100)
+            );
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ncaa_spread_bets (
+                id VARCHAR(50) PRIMARY KEY,
+                date VARCHAR(20),
+                match_name TEXT,
+                spread_line REAL,
+                odds REAL,
+                edge REAL,
+                stake REAL,
+                status VARCHAR(20),
+                profit REAL,
+                best_pick VARCHAR(100)
+            );
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS team_power_ratings (
+                team_name VARCHAR(100) PRIMARY KEY,
+                rating REAL
+            );
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS model_weights (
+                param_key VARCHAR(50) PRIMARY KEY,
+                param_value REAL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        ''')
+        cursor.execute("INSERT INTO model_weights (param_key, param_value) VALUES ('blend_weight', 0.15) ON CONFLICT (param_key) DO NOTHING;")
+        cursor.execute("INSERT INTO model_weights (param_key, param_value) VALUES ('home_field_advantage', 2.5) ON CONFLICT (param_key) DO NOTHING;")
+        
+        for team in CFBD_TEAMS_DATABASE:
+            cursor.execute('INSERT INTO team_power_ratings (team_name, rating) VALUES (%s, %s) ON CONFLICT (team_name) DO NOTHING;', (team, 10.0))
+        db_conn.commit()
+        cursor.close()
+    except Exception as e:
+        db_conn.rollback()
+        st.error(f"Błąd inicjalizacji bazy: {e}")
 
 if db_conn:
     setup_database_schema()
@@ -143,7 +146,7 @@ def get_power_rating(team_name):
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Master Canonical Engine v6.0 (OddsPapi)")
+    st.caption("Master Canonical Engine v6.1 (OddsPapi)")
     st.markdown("---")
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
@@ -163,7 +166,6 @@ def fetch_oddspapi_data():
         api_status_code = res.status_code
         if res.status_code == 200:
             data = res.json()
-            # Obsługa struktur zwracanych przez OddsPapi
             matches_list = data.get('data', data) if isinstance(data, dict) else data
             raw_count = len(matches_list) if isinstance(matches_list, list) else 0
             
@@ -172,7 +174,6 @@ def fetch_oddspapi_data():
                 home = normalize_team_name(match.get('home_team', match.get('home', '')))
                 away = normalize_team_name(match.get('away_team', match.get('away', '')))
                 
-                # Przykładowe wyciąganie kursów H2H z struktury OddsPapi
                 odds_home = float(match.get('odds_home', match.get('home_odds', 1.90)))
                 odds_away = float(match.get('odds_away', match.get('away_odds', 1.90)))
                 
@@ -192,7 +193,6 @@ def fetch_oddspapi_data():
 
 raw_matches, api_status, raw_count = fetch_oddspapi_data()
 analyzed_matches = []
-analyzed_spreads = []
 
 cursor = db_conn.cursor() if db_conn else None
 
@@ -249,7 +249,7 @@ if cursor:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v6.0 (OddsPapi)")
+st.markdown("## 🏈 College Football Quant Dashboard v6.1 (OddsPapi)")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 Sygnały H2H", "🎯 Spreads", "📈 Statystyki & ROI", "🛡️ Diagnostyka API", "📁 Rejestr w Chmurze"])
 
 with tab1:
