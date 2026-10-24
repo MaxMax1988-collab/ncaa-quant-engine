@@ -3,12 +3,12 @@ import pandas as pd
 import numpy as np
 import requests
 import psycopg2
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from scipy.stats import norm
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.4 (OddsPapi v4)",
+    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.5 (Official OddsPapi)",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -151,51 +151,96 @@ def get_power_rating(team_name):
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Master Canonical Engine v6.4 (OddsPapi v4)")
+    st.caption("Master Canonical Engine v6.5")
     st.markdown("---")
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.1) / 100.0
 
-# --- POBIERANIE DANYCH Z ODDSPAPI V4 ---
+# --- POBIERANIE DANYCH Z ODDSPAPI V4 (ZGODNIE Z OFICJALNYM SDK) ---
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_oddspapi_v4():
-    # Klucz w parametrach zapytania (apiKey) - tak jak wymaga OddsPapi v4!
-    params = {"apiKey": ODDS_API_KEY, "sportId": 14, "hasOdds": "true"}
+def fetch_oddspapi_data():
     all_matches = []
     api_status_code = None
     raw_count = 0
     
     try:
-        res = requests.get(f"{ODDSPAPI_BASE_URL}/fixtures", params=params, timeout=10)
+        # Krok 1: Pobranie fixtures z oficjalnym tournamentId=27653
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        future_str = (datetime.now(timezone.utc) + timedelta(days=10)).strftime("%Y-%m-%d")
+        
+        params = {
+            "apiKey": ODDS_API_KEY,
+            "tournamentId": 27653,
+            "from": today_str,
+            "to": future_str
+        }
+        res = requests.get(f"{ODDSPAPI_BASE_URL}/fixtures", params=params, timeout=30)
         api_status_code = res.status_code
+        
         if res.status_code == 200:
-            data = res.json()
-            matches_list = data.get('data', data) if isinstance(data, dict) else data
-            raw_count = len(matches_list) if isinstance(matches_list, list) else 0
-            
-            for match in matches_list:
-                match_id = str(match.get('fixtureId', match.get('id', '')))
-                home = normalize_team_name(match.get('homeTeam', match.get('participant1Name', match.get('home', ''))))
-                away = normalize_team_name(match.get('awayTeam', match.get('participant2Name', match.get('away', ''))))
+            fixtures = res.json()
+            if isinstance(fixtures, list):
+                raw_count = len(fixtures)
+                now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
                 
-                odds_home = float(match.get('oddsHome', match.get('homeOdds', 1.90)))
-                odds_away = float(match.get('oddsAway', match.get('awayOdds', 1.90)))
+                # Wybieramy nadchodzące mecze z kursami
+                upcoming = [f for f in fixtures if f.get("hasOdds") and f.get("startTime", "") > now_iso]
                 
-                if home and away:
-                    all_matches.append({
-                        "id": match_id or f"{home}_{away}",
-                        "home": home, "away": away,
-                        "commence_time": match.get('startTime', match.get('commence_time', 'Dzisiaj')),
-                        "odds_home": odds_home if odds_home > 1.0 else 1.90,
-                        "odds_away": odds_away if odds_away > 1.0 else 1.90,
-                    })
+                for fixture in upcoming[:15]: # Pobieramy pierwszych 15 meczów dla wydajności
+                    fix_id = fixture.get("fixtureId")
+                    home = normalize_team_name(fixture.get("participant1Name"))
+                    away = normalize_team_name(fixture.get("participant2Name"))
+                    
+                    # Krok 2: Pobranie kursów dla fixture
+                    odds_params = {
+                        "apiKey": ODDS_API_KEY,
+                        "fixtureId": fix_id,
+                        "bookmakers": "pinnacle,bet365,draftkings"
+                    }
+                    odds_res = requests.get(f"{ODDSPAPI_BASE_URL}/odds", params=odds_params, timeout=10)
+                    if odds_res.status_code == 200:
+                        odds_data = odds_res.json()
+                        boards = odds_data.get("bookmakerOdds", {})
+                        
+                        # Szukamy rynku głównego (np. id "1" lub "141")
+                        h2h_home_prices = []
+                        h2h_away_prices = []
+                        
+                        for slug, board in boards.items():
+                            markets = board.get("markets", {})
+                            for m_id in ["1", "141"]:
+                                if m_id in markets:
+                                    outcomes = markets[m_id].get("outcomes", {})
+                                    # Pobieramy ceny dla gracza "0" (match market)
+                                    for out_id, leg in outcomes.items():
+                                        players = leg.get("players", {})
+                                        if "0" in players and players["0"].get("active"):
+                                            price = float(players["0"].get("price", 0))
+                                            # Rozróżnienie gospodarz/gość na podstawie ID lub kolejności
+                                            if out_id == fixture.get("participant1Id") or len(h2h_home_prices) == 0:
+                                                h2h_home_prices.append(price)
+                                            else:
+                                                h2h_away_prices.append(price)
+                        
+                        odds_home = float(np.median(h2h_home_prices)) if h2h_home_prices else 1.90
+                        odds_away = float(np.median(h2h_away_prices)) if h2h_away_prices else 1.90
+                        
+                        if home and away and odds_home > 1.0 and odds_away > 1.0:
+                            all_matches.append({
+                                "id": str(fix_id),
+                                "home": home,
+                                "away": away,
+                                "commence_time": fixture.get("startTime", "Dzisiaj"),
+                                "odds_home": odds_home,
+                                "odds_away": odds_away
+                            })
     except Exception as e:
         api_status_code = str(e)
         
     return all_matches, api_status_code, raw_count
 
-raw_matches, api_status, raw_count = fetch_oddspapi_v4()
+raw_matches, api_status, raw_count = fetch_oddspapi_data()
 analyzed_matches = []
 
 conn_insert = get_db_connection()
@@ -240,7 +285,7 @@ for m in raw_matches:
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (id) DO NOTHING;
                         """,
-                        (match_id, datetime.now().strftime("%Y-%m-%d"), match_name, round(best_odds, 2), best_prob, best_edge, stake, 'Oczekujący', 0.0, m['home'], m['away'], best_pick)
+                        (match_id, datetime.now(timezone.utc).strftime("%Y-%m-%d"), match_name, round(best_odds, 2), best_prob, best_edge, stake, 'Oczekujący', 0.0, m['home'], m['away'], best_pick)
                     )
                     conn_insert.commit()
             except Exception:
@@ -259,11 +304,11 @@ if conn_insert:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v6.4 (OddsPapi v4)")
+st.markdown("## 🏈 College Football Quant Dashboard v6.5 (Official OddsPapi)")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 Sygnały H2H", "🎯 Spreads", "📈 Statystyki & ROI", "🛡️ Diagnostyka API", "📁 Rejestr w Chmurze"])
 
 with tab1:
-    st.subheader("Terminal Analityczny (OddsPapi v4 Feed)")
+    st.subheader("Terminal Analityczny (Oficjalny Feed OddsPapi v4)")
     if not analyzed_matches:
         st.warning("Brak meczów spełniających kryteria Edge. Sprawdź zakładkę 'Diagnostyka API'.")
     else:
@@ -305,12 +350,12 @@ with tab3:
         st.dataframe(df_stats, use_container_width=True)
 
 with tab4:
-    st.subheader("🛡️ Diagnostyka Połączenia z OddsPapi v4")
+    st.subheader("🛡️ Diagnostyka Połączenia OddsPapi v4")
     st.markdown(f"""
         <div class="test-box">
         <b>[API Status Code]:</b> {api_status}<br>
-        <b>[Liczba obiektów z OddsPapi v4]:</b> {raw_count}<br>
-        <b>[Przetworzone mecze]:</b> {len(raw_matches)}<br>
+        <b>[Liczba pobranych fixture z turnieju 27653]:</b> {raw_count}<br>
+        <b>[Przetworzone mecze z kursami]:</b> {len(raw_matches)}<br>
         <b>[Sygnały po filtrze Edge]:</b> {len(analyzed_matches)}<br>
         </div>
     """, unsafe_allow_html=True)
@@ -328,4 +373,4 @@ with tab5:
             st.error(f"Błąd odczytu rejestru: {e}")
     else:
         st.warning("Brak połączenia z bazą danych.")
-        
+                
