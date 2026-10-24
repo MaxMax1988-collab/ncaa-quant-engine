@@ -8,7 +8,7 @@ from scipy.stats import norm
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.2",
+    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.4 (OddsPapi v4)",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -26,9 +26,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- CONFIG API ODDSPAPI ---
+# --- CONFIG ODDSPAPI V4 ---
 ODDS_API_KEY = "fb92c775-169b-4df2-811a-7932f0355639"
-ODDPAPI_BASE_URL = "https://api.oddspapi.com/v1/odds"
+ODDSPAPI_BASE_URL = "https://api.oddspapi.io/v4"
 
 CFBD_TEAMS_DATABASE = [
     "Air Force", "Akron", "Alabama", "Appalachian State", "Arizona", "Arizona State", "Arkansas", "Arkansas State",
@@ -151,23 +151,23 @@ def get_power_rating(team_name):
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Master Canonical Engine v6.2 (OddsPapi)")
+    st.caption("Master Canonical Engine v6.4 (OddsPapi v4)")
     st.markdown("---")
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.1) / 100.0
 
-# --- POBIERANIE DANYCH Z ODDSPAPI ---
+# --- POBIERANIE DANYCH Z ODDSPAPI V4 ---
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_oddspapi_data():
-    headers = {"x-api-key": ODDS_API_KEY}
-    params = {"sport": "americanfootball_ncaaf"}
+def fetch_oddspapi_v4():
+    # Klucz w parametrach zapytania (apiKey) - tak jak wymaga OddsPapi v4!
+    params = {"apiKey": ODDS_API_KEY, "sportId": 14, "hasOdds": "true"}
     all_matches = []
     api_status_code = None
     raw_count = 0
     
     try:
-        res = requests.get(ODDPAPI_BASE_URL, headers=headers, params=params, timeout=10)
+        res = requests.get(f"{ODDSPAPI_BASE_URL}/fixtures", params=params, timeout=10)
         api_status_code = res.status_code
         if res.status_code == 200:
             data = res.json()
@@ -175,28 +175,27 @@ def fetch_oddspapi_data():
             raw_count = len(matches_list) if isinstance(matches_list, list) else 0
             
             for match in matches_list:
-                match_id = str(match.get('id', match.get('match_id', '')))
-                home = normalize_team_name(match.get('home_team', match.get('home', '')))
-                away = normalize_team_name(match.get('away_team', match.get('away', '')))
+                match_id = str(match.get('fixtureId', match.get('id', '')))
+                home = normalize_team_name(match.get('homeTeam', match.get('participant1Name', match.get('home', ''))))
+                away = normalize_team_name(match.get('awayTeam', match.get('participant2Name', match.get('away', ''))))
                 
-                odds_home = float(match.get('odds_home', match.get('home_odds', 1.90)))
-                odds_away = float(match.get('odds_away', match.get('away_odds', 1.90)))
+                odds_home = float(match.get('oddsHome', match.get('homeOdds', 1.90)))
+                odds_away = float(match.get('oddsAway', match.get('awayOdds', 1.90)))
                 
-                if home and away and odds_home > 1.0 and odds_away > 1.0:
+                if home and away:
                     all_matches.append({
                         "id": match_id or f"{home}_{away}",
                         "home": home, "away": away,
-                        "commence_time": match.get('commence_time', 'Dzisiaj'),
-                        "odds_home": odds_home,
-                        "odds_away": odds_away,
-                        "spreads": match.get('spreads', [])
+                        "commence_time": match.get('startTime', match.get('commence_time', 'Dzisiaj')),
+                        "odds_home": odds_home if odds_home > 1.0 else 1.90,
+                        "odds_away": odds_away if odds_away > 1.0 else 1.90,
                     })
     except Exception as e:
         api_status_code = str(e)
         
     return all_matches, api_status_code, raw_count
 
-raw_matches, api_status, raw_count = fetch_oddspapi_data()
+raw_matches, api_status, raw_count = fetch_oddspapi_v4()
 analyzed_matches = []
 
 conn_insert = get_db_connection()
@@ -260,11 +259,11 @@ if conn_insert:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v6.2 (OddsPapi)")
+st.markdown("## 🏈 College Football Quant Dashboard v6.4 (OddsPapi v4)")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 Sygnały H2H", "🎯 Spreads", "📈 Statystyki & ROI", "🛡️ Diagnostyka API", "📁 Rejestr w Chmurze"])
 
 with tab1:
-    st.subheader("Terminal Analityczny (OddsPapi Feed)")
+    st.subheader("Terminal Analityczny (OddsPapi v4 Feed)")
     if not analyzed_matches:
         st.warning("Brak meczów spełniających kryteria Edge. Sprawdź zakładkę 'Diagnostyka API'.")
     else:
@@ -285,7 +284,7 @@ with tab1:
 
 with tab2:
     st.subheader("🎯 Handicapy (Spread Betting)")
-    st.info("Moduł handicapów czeka na zasilenie danymi spread z OddsPapi.")
+    st.info("Moduł handicapów czeka na zasilenie danymi spread z OddsPapi v4.")
 
 with tab3:
     st.subheader("📈 Analiza Skuteczności & ROI")
@@ -306,11 +305,11 @@ with tab3:
         st.dataframe(df_stats, use_container_width=True)
 
 with tab4:
-    st.subheader("🛡️ Diagnostyka Połączenia z OddsPapi")
+    st.subheader("🛡️ Diagnostyka Połączenia z OddsPapi v4")
     st.markdown(f"""
         <div class="test-box">
         <b>[API Status Code]:</b> {api_status}<br>
-        <b>[Liczba obiektów z OddsPapi]:</b> {raw_count}<br>
+        <b>[Liczba obiektów z OddsPapi v4]:</b> {raw_count}<br>
         <b>[Przetworzone mecze]:</b> {len(raw_matches)}<br>
         <b>[Sygnały po filtrze Edge]:</b> {len(analyzed_matches)}<br>
         </div>
