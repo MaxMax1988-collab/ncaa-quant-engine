@@ -6,3 +6,4 @@ rapidfuzz
 cfbd
 plotly
 scikit-learn
+psycopg2-binary
