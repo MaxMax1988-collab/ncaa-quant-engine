@@ -3,12 +3,12 @@ import pandas as pd
 import numpy as np
 import requests
 import psycopg2
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from scipy.stats import norm
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.5 (Official OddsPapi)",
+    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.6",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -151,13 +151,13 @@ def get_power_rating(team_name):
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Master Canonical Engine v6.5")
+    st.caption("Master Canonical Engine v6.6")
     st.markdown("---")
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.1) / 100.0
 
-# --- POBIERANIE DANYCH Z ODDSPAPI V4 (ZGODNIE Z OFICJALNYM SDK) ---
+# --- POBIERANIE DANYCH Z ODDSPAPI V4 ---
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_oddspapi_data():
     all_matches = []
@@ -165,7 +165,6 @@ def fetch_oddspapi_data():
     raw_count = 0
     
     try:
-        # Krok 1: Pobranie fixtures z oficjalnym tournamentId=27653
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         future_str = (datetime.now(timezone.utc) + timedelta(days=10)).strftime("%Y-%m-%d")
         
@@ -183,16 +182,13 @@ def fetch_oddspapi_data():
             if isinstance(fixtures, list):
                 raw_count = len(fixtures)
                 now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                
-                # Wybieramy nadchodzące mecze z kursami
                 upcoming = [f for f in fixtures if f.get("hasOdds") and f.get("startTime", "") > now_iso]
                 
-                for fixture in upcoming[:15]: # Pobieramy pierwszych 15 meczów dla wydajności
+                for fixture in upcoming[:15]:
                     fix_id = fixture.get("fixtureId")
                     home = normalize_team_name(fixture.get("participant1Name"))
                     away = normalize_team_name(fixture.get("participant2Name"))
                     
-                    # Krok 2: Pobranie kursów dla fixture
                     odds_params = {
                         "apiKey": ODDS_API_KEY,
                         "fixtureId": fix_id,
@@ -203,7 +199,6 @@ def fetch_oddspapi_data():
                         odds_data = odds_res.json()
                         boards = odds_data.get("bookmakerOdds", {})
                         
-                        # Szukamy rynku głównego (np. id "1" lub "141")
                         h2h_home_prices = []
                         h2h_away_prices = []
                         
@@ -212,12 +207,10 @@ def fetch_oddspapi_data():
                             for m_id in ["1", "141"]:
                                 if m_id in markets:
                                     outcomes = markets[m_id].get("outcomes", {})
-                                    # Pobieramy ceny dla gracza "0" (match market)
                                     for out_id, leg in outcomes.items():
                                         players = leg.get("players", {})
                                         if "0" in players and players["0"].get("active"):
                                             price = float(players["0"].get("price", 0))
-                                            # Rozróżnienie gospodarz/gość na podstawie ID lub kolejności
                                             if out_id == fixture.get("participant1Id") or len(h2h_home_prices) == 0:
                                                 h2h_home_prices.append(price)
                                             else:
@@ -304,7 +297,7 @@ if conn_insert:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v6.5 (Official OddsPapi)")
+st.markdown("## 🏈 College Football Quant Dashboard v6.6 (Official OddsPapi)")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 Sygnały H2H", "🎯 Spreads", "📈 Statystyki & ROI", "🛡️ Diagnostyka API", "📁 Rejestr w Chmurze"])
 
 with tab1:
@@ -373,4 +366,3 @@ with tab5:
             st.error(f"Błąd odczytu rejestru: {e}")
     else:
         st.warning("Brak połączenia z bazą danych.")
-                
