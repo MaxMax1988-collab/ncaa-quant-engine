@@ -3,14 +3,13 @@ import pandas as pd
 import numpy as np
 import requests
 import psycopg2
-from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta, timezone
 from rapidfuzz import process, fuzz
 from scipy.stats import norm
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet NCAA - Master Canonical Quant Engine v5.0",
+    page_title="Maksbet NCAA - Master Canonical Quant Engine v5.3",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -25,19 +24,18 @@ st.markdown("""
     .value-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-left: 6px solid #3b82f6; padding: 20px; border-radius: 12px; margin-bottom: 15px; border: 1px solid #334155; }
     .test-box { background: #111827; border: 1px solid #374151; padding: 15px; border-radius: 10px; margin-bottom: 10px; font-family: monospace; font-size: 13px; }
     .badge-power { background-color: #059669; color: #ffffff; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: bold; }
-    .badge-conf { background-color: #6366f1; color: #ffffff; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- CONFIG API ---
-ODDS_API_KEY = "0beda11c896fdc2856297c26d89ff7ba"
+# --- CONFIG API (NOWY KLUCZ) ---
+ODDS_API_KEY = "fb92c775-169b-4df2-811a-7932f0355639"
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
 CFBD_TEAMS_DATABASE = [
     "Air Force", "Akron", "Alabama", "Appalachian State", "Arizona", "Arizona State", "Arkansas", "Arkansas State",
     "Army", "Auburn", "Ball State", "Baylor", "Boise State", "Boston College", "Bowling Green", "Buffalo",
     "BYU", "California", "Central Michigan", "Charlotte", "Cincinnati", "Clemson", "Coastal Carolina", "Colorado",
-    "Colorado State", "Delaware", "Duke", "East Carolina", "Eastern Michigan", "FIU", "Florida", "Florida Atlantic", "Florida State",
+    "Colorado State", "Duke", "East Carolina", "Eastern Michigan", "FIU", "Florida", "Florida Atlantic", "Florida State",
     "Fresno State", "Georgia", "Georgia Southern", "Georgia State", "Georgia Tech", "Hawaii", "Houston", "Illinois",
     "Indiana", "Iowa", "Iowa State", "James Madison", "Kansas", "Kansas State", "Kennesaw State", "Kent State", "Kentucky",
     "Liberty", "Louisiana", "Louisiana Tech", "Louisville", "LSU", "Marshall", "Maryland", "Memphis",
@@ -54,46 +52,27 @@ CFBD_TEAMS_DATABASE = [
 ]
 
 MASTER_CANONICAL_MAP = {
-    "FIU Panthers": "FIU", "Florida International": "FIU", "Florida International Panthers": "FIU",
-    "Mid. Tennessee Blue Raiders": "Middle Tennessee", "Middle Tennessee Blue Raiders": "Middle Tennessee",
-    "Delaware Blue Hens": "Delaware", "Missouri State Bears": "Missouri State", "Marshall Thundering Herd": "Marshall",
-    "South Alabama Jaguars": "South Alabama", "Colorado Buffaloes": "Colorado", "Utah Utes": "Utah",
-    "Hawaii Rainbow Warriors": "Hawaii", "New Mexico Lobos": "New Mexico", "California Golden Bears": "California",
-    "Wake Forest Demon Deacons": "Wake Forest", "San Diego State Aztecs": "San Diego State", "Fresno State Bulldogs": "Fresno State",
-    "Oregon Ducks": "Oregon", "Nebraska Cornhuskers": "Nebraska", "Texas El Paso Miners": "UTEP",
-    "San Jose State": "San Jose State", "Ohio Bobcats": "Ohio", "Texas San Antonio Roadrunners": "UTSA",
-    "Navy Midshipmen": "Navy", "UCLA Bruins": "UCLA", "Wisconsin Badgers": "Wisconsin", "Oklahoma Sooners": "Oklahoma",
-    "Kentucky Wildcats": "Kentucky", "Stanford Cardinal": "Stanford", "Louisiana Tech Bulldogs": "Louisiana Tech",
-    "Houston Cougars": "Houston", "Oklahoma State": "Oklahoma State", "Brigham Young Cougars": "BYU",
+    "FIU Panthers": "FIU", "Florida International": "FIU",
+    "Marshall Thundering Herd": "Marshall", "Colorado Buffaloes": "Colorado",
+    "Utah Utes": "Utah", "Oregon Ducks": "Oregon", "Nebraska Cornhuskers": "Nebraska",
+    "UCLA Bruins": "UCLA", "Wisconsin Badgers": "Wisconsin", "Oklahoma Sooners": "Oklahoma",
+    "Kentucky Wildcats": "Kentucky", "Stanford Cardinal": "Stanford", "Houston Cougars": "Houston",
     "Notre Dame Fighting Irish": "Notre Dame", "Syracuse Orange": "Syracuse", "Louisville Cardinals": "Louisville",
-    "Miami Florida": "Miami", "Florida State Seminoles": "Florida State", "South Florida Bulls": "South Florida",
-    "Kent State Golden Flashes": "Kent State", "Baylor Bears": "Baylor", "TCU Horned Frogs": "TCU",
-    "Oregon State Beavers": "Oregon State", "Washington State Cougars": "Washington State", "Vanderbilt Commodores": "Vanderbilt",
-    "Arkansas Razorbacks": "Arkansas", "Alabama Crimson Tide": "Alabama", "Missouri Tigers": "Missouri",
-    "Duke Blue Devils": "Duke", "Florida Gators": "Florida", "Kennesaw State Owls": "Kennesaw State",
-    "Liberty Flames": "Liberty", "Appalachian St. Mountaineers": "Appalachian State", "Appalachian State Mountaineers": "Appalachian State",
-    "James Madison Dukes": "James Madison", "Memphis Tigers": "Memphis", "East Carolina Pirates": "East Carolina"
+    "Florida State Seminoles": "Florida State", "Baylor Bears": "Baylor", "TCU Horned Frogs": "TCU",
+    "Oregon State Beavers": "Oregon State", "Washington State Cougars": "Washington State",
+    "Vanderbilt Commodores": "Vanderbilt", "Arkansas Razorbacks": "Arkansas", "Alabama Crimson Tide": "Alabama",
+    "Missouri Tigers": "Missouri", "Duke Blue Devils": "Duke", "Florida Gators": "Florida"
 }
 
-CONFERENCE_BASE_RATINGS = {
-    "Georgia": 24.0, "Alabama": 23.0, "Ohio State": 23.5, "Texas": 22.0, "Oregon": 21.5,
-    "Penn State": 20.0, "Notre Dame": 19.5, "Ole Miss": 19.0, "LSU": 18.5, "Michigan": 18.0,
-    "Tennessee": 17.5, "Clemson": 17.0, "Missouri": 16.5, "Oklahoma": 16.0, "USC": 15.5,
-    "South Alabama": 8.0, "Marshall": 8.5, "FIU": 4.0, "Middle Tennessee": 4.5,
-    "Delaware": 5.0, "Missouri State": 5.0, "Kennesaw State": 6.0, "Liberty": 14.0,
-    "Appalachian State": 12.0, "James Madison": 13.5, "Memphis": 13.0, "East Carolina": 9.0
-}
-
-def normalize_team_name(team_name_raw, stats_team_list=None, threshold=75):
+def normalize_team_name(team_name_raw):
     if not team_name_raw:
         return "Unknown"
     clean_raw = team_name_raw.strip()
     if clean_raw in MASTER_CANONICAL_MAP:
         return MASTER_CANONICAL_MAP[clean_raw]
-    if stats_team_list:
-        match_res = process.extractOne(clean_raw, stats_team_list, scorer=fuzz.TokenSortRatio)
-        if match_res and match_res[1] >= threshold:
-            return match_res[0]
+    for team in CFBD_TEAMS_DATABASE:
+        if team.lower() == clean_raw.lower() or team.lower() in clean_raw.lower():
+            return team
     return clean_raw
 
 # --- POŁĄCZENIE Z BAZĄ NEON POSTGRESQL ---
@@ -104,7 +83,6 @@ def init_cloud_db():
         conn = psycopg2.connect(conn_str)
         return conn
     except Exception as e:
-        st.error(f"Błąd połączenia z bazą Neon: {e}")
         return None
 
 db_conn = init_cloud_db()
@@ -113,7 +91,6 @@ def setup_database_schema():
     if not db_conn:
         return
     cursor = db_conn.cursor()
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ncaa_bets (
             id VARCHAR(50) PRIMARY KEY,
@@ -130,29 +107,12 @@ def setup_database_schema():
             best_pick VARCHAR(100)
         );
     ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ncaa_spread_bets (
-            id VARCHAR(50) PRIMARY KEY,
-            date VARCHAR(20),
-            match_name TEXT,
-            spread_line REAL,
-            odds REAL,
-            edge REAL,
-            stake REAL,
-            status VARCHAR(20),
-            profit REAL,
-            best_pick VARCHAR(100)
-        );
-    ''')
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS team_power_ratings (
             team_name VARCHAR(100) PRIMARY KEY,
             rating REAL
         );
     ''')
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS model_weights (
             param_key VARCHAR(50) PRIMARY KEY,
@@ -160,218 +120,95 @@ def setup_database_schema():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     ''')
-    
     cursor.execute("INSERT INTO model_weights (param_key, param_value) VALUES ('blend_weight', 0.15) ON CONFLICT (param_key) DO NOTHING;")
     cursor.execute("INSERT INTO model_weights (param_key, param_value) VALUES ('home_field_advantage', 2.5) ON CONFLICT (param_key) DO NOTHING;")
-    cursor.execute("INSERT INTO model_weights (param_key, param_value) VALUES ('learning_rate', 0.8) ON CONFLICT (param_key) DO NOTHING;")
-
+    
     for team in CFBD_TEAMS_DATABASE:
-        default_val = CONFERENCE_BASE_RATINGS.get(team, 5.0)
-        cursor.execute('''
-            INSERT INTO team_power_ratings (team_name, rating) VALUES (%s, %s)
-            ON CONFLICT (team_name) DO NOTHING;
-        ''', (team, default_val))
-        
+        cursor.execute('INSERT INTO team_power_ratings (team_name, rating) VALUES (%s, %s) ON CONFLICT (team_name) DO NOTHING;', (team, 10.0))
     db_conn.commit()
     cursor.close()
 
 if db_conn:
     setup_database_schema()
 
-def get_model_weight(param_key, default_val):
-    if not db_conn:
-        return default_val
-    cursor = db_conn.cursor()
-    cursor.execute("SELECT param_value FROM model_weights WHERE param_key = %s", (param_key,))
-    row = cursor.fetchone()
-    cursor.close()
-    return row[0] if row else default_val
-
 def get_power_rating(team_name):
     if not db_conn:
-        return 5.0
+        return 10.0
     cursor = db_conn.cursor()
     cursor.execute("SELECT rating FROM team_power_ratings WHERE team_name = %s", (team_name,))
     row = cursor.fetchone()
     cursor.close()
-    return row[0] if row else 5.0
-
-def update_ml_weights_and_ratings(home_team, away_team, home_won, model_error):
-    """System Uczenia Maszynowego: Samokalibracja wag i Power Ratings na podstawie błędów predykcji."""
-    if not db_conn:
-        return
-    cursor = db_conn.cursor()
-    
-    # 1. Aktualizacja Power Ratings
-    lr = get_model_weight('learning_rate', 0.8)
-    adjustment = (lr * model_error) if home_won else (-lr * abs(model_error))
-    
-    h_rat = get_power_rating(home_team)
-    a_rat = get_power_rating(away_team)
-    
-    cursor.execute("UPDATE team_power_ratings SET rating = rating + %s WHERE team_name = %s", (adjustment, home_team))
-    cursor.execute("UPDATE team_power_ratings SET rating = rating - %s WHERE team_name = %s", (adjustment, away_team))
-    
-    # 2. Dynamiczna korekta Home Field Advantage (HFA) w locie
-    hfa = get_model_weight('home_field_advantage', 2.5)
-    new_hfa = hfa + (0.01 if home_won else -0.01) # Adaptacja marginesu boiska
-    cursor.execute("UPDATE model_weights SET param_value = %s WHERE param_key = 'home_field_advantage'", (new_hfa,))
-    
-    db_conn.commit()
-    cursor.close()
-
-# --- AUTOMATYCZNE ROZLICZANIE (FEEDBACK LOOP) ---
-def auto_settle_ncaa_from_api():
-    if not db_conn:
-        return
-    cursor = db_conn.cursor()
-    cursor.execute("SELECT id, odds, stake, best_pick, home_team, away_team FROM ncaa_bets WHERE status = 'Oczekujący'")
-    pending_bets = cursor.fetchall()
-    cursor.close()
-    
-    if not pending_bets:
-        return
-
-    url = f"{ODDS_BASE_URL}/americanfootball_ncaaf/scores"
-    params = {"apiKey": ODDS_API_KEY, "daysFrom": 7}
-    try:
-        res = requests.get(url, params=params, timeout=10)
-        if res.status_code == 200:
-            for match in res.json():
-                if match.get("completed", False):
-                    match_id = str(match.get("id"))
-                    scores = match.get("scores", [])
-                    if scores and len(scores) >= 2:
-                        s1 = int(scores[0].get("score", 0))
-                        s2 = int(scores[1].get("score", 0))
-                        t1 = normalize_team_name(scores[0].get("name"), CFBD_TEAMS_DATABASE)
-                        t2 = normalize_team_name(scores[1].get("name"), CFBD_TEAMS_DATABASE)
-                        
-                        for bet in pending_bets:
-                            bet_id, odds, stake, best_pick, home, away = bet
-                            if bet_id == match_id:
-                                winner = t1 if s1 > s2 else t2
-                                won = (best_pick == winner)
-                                profit = round((odds - 1.0) * stake, 2) if won else round(-stake, 2)
-                                status = 'Wygrany' if won else 'Przegrany'
-                                
-                                cur = db_conn.cursor()
-                                cur.execute("UPDATE ncaa_bets SET status = %s, profit = %s WHERE id = %s", (status, profit, bet_id))
-                                db_conn.commit()
-                                cur.close()
-                                
-                                home_won = (winner == home)
-                                model_error = abs(s1 - s2) / 10.0
-                                update_ml_weights_and_ratings(home, away, home_won, model_error)
-    except Exception:
-        pass
-
-auto_settle_ncaa_from_api()
+    return row[0] if row else 10.0
 
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Master Canonical Engine v5.0 (Neon Cloud + ML)")
+    st.caption("Master Canonical Engine v5.3 (Pure API)")
     st.markdown("---")
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
-    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.5) / 100.0
-    st.markdown("---")
-    st.markdown("<b>🧠 System Uczenia Maszynowego:</b>", unsafe_allow_html=True)
-    st.success("✅ Neon Cloud DB Aktywna")
-    st.info(f"⚡ HFA (Waga boiska): {get_model_weight('home_field_advantage', 2.5):.2f}")
-    
-    st.markdown("---")
-    if db_conn:
-        cur = db_conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM ncaa_bets")
-        total_tracked = cur.fetchone()[0]
-        cur.close()
-        st.metric("Wszystkie Sygnały w Chmurze", total_tracked)
+    min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.1) / 100.0
 
-# --- POBIERANIE KURSÓW (H2H i Spreads) ---
+# --- POBIERANIE CZYSTYCH DANYCH Z API ---
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_ncaa_data():
     url = f"{ODDS_BASE_URL}/americanfootball_ncaaf/odds"
-    params = {"apiKey": ODDS_API_KEY, "regions": "us,eu", "markets": "h2h,spreads", "oddsFormat": "decimal"}
+    params = {"apiKey": ODDS_API_KEY, "regions": "us,eu", "markets": "h2h", "oddsFormat": "decimal"}
     all_matches = []
-    now_utc = datetime.now(timezone.utc)
-    max_future_time = now_utc + timedelta(hours=96)
+    api_status_code = None
+    raw_response_data = []
     
     try:
         res = requests.get(url, params=params, timeout=10)
+        api_status_code = res.status_code
         if res.status_code == 200:
-            for match in res.json():
-                commence = match.get('commence_time')
-                if commence:
-                    try:
-                        match_time = datetime.fromisoformat(commence.replace('Z', '+00:00'))
-                        if match_time < now_utc or match_time > max_future_time:
-                            continue
-                    except Exception:
-                        pass
-                
+            raw_response_data = res.json()
+            for match in raw_response_data:
                 match_id = str(match.get('id'))
-                home = normalize_team_name(match.get('home_team'), CFBD_TEAMS_DATABASE)
-                away = normalize_team_name(match.get('away_team'), CFBD_TEAMS_DATABASE)
+                home = normalize_team_name(match.get('home_team'))
+                away = normalize_team_name(match.get('away_team'))
                 
                 h2h_home, h2h_away = [], []
-                spreads_data = []
-                
                 for book in match.get('bookmakers', []):
                     for mkt in book.get('markets', []):
                         if mkt.get('key') == 'h2h':
                             for out in mkt.get('outcomes', []):
                                 p = float(out.get('price', 0))
-                                if 1.01 <= p <= 25.0:
-                                    name = normalize_team_name(out.get('name'), CFBD_TEAMS_DATABASE)
-                                    if name == home: h2h_home.append(p)
-                                    elif name == away: h2h_away.append(p)
-                        elif mkt.get('key') == 'spreads':
-                            for out in mkt.get('outcomes', []):
-                                name = normalize_team_name(out.get('name'), CFBD_TEAMS_DATABASE)
-                                point = out.get('point')
-                                price = out.get('price')
-                                if point is not None and price is not None:
-                                    spreads_data.append({"team": name, "point": float(point), "price": float(price)})
+                                name = normalize_team_name(out.get('name'))
+                                if name == home: h2h_home.append(p)
+                                elif name == away: h2h_away.append(p)
                 
                 if h2h_home and h2h_away:
                     all_matches.append({
                         "id": match_id, "home": home, "away": away,
-                        "commence_time": commence,
+                        "commence_time": match.get('commence_time', 'Brak daty'),
                         "odds_home": float(np.median(h2h_home)),
-                        "odds_away": float(np.median(h2h_away)),
-                        "spreads": spreads_data
+                        "odds_away": float(np.median(h2h_away))
                     })
-    except Exception:
-        pass
-    return all_matches
+    except Exception as e:
+        api_status_code = str(e)
+        
+    return all_matches, api_status_code, len(raw_response_data)
 
-raw_matches = fetch_ncaa_data()
+raw_matches, api_status, raw_count = fetch_ncaa_data()
 analyzed_matches = []
-analyzed_spreads = []
 
-blend_weight = get_model_weight('blend_weight', 0.15)
-hfa = get_model_weight('home_field_advantage', 2.5)
-
-if db_conn:
-    cursor = db_conn.cursor()
+cursor = db_conn.cursor() if db_conn else None
 
 for m in raw_matches:
     match_id = m['id']
     match_name = f"{m['home']} vs {m['away']}"
     odds_home, odds_away = m['odds_home'], m['odds_away']
     
-    # Obliczenia H2H Value
     prob_raw_h, prob_raw_a = 1.0 / odds_home, 1.0 / odds_away
     tot_v = prob_raw_h + prob_raw_a
     implied_h, implied_a = prob_raw_h / tot_v, prob_raw_a / tot_v
     
     rat_h, rat_a = get_power_rating(m['home']), get_power_rating(m['away'])
-    expected_margin = (rat_h - rat_a) + hfa
+    expected_margin = (rat_h - rat_a) + 2.5
     model_prob_h = norm.cdf(expected_margin, loc=0, scale=13.5)
     
-    ai_prob_home = np.clip((1.0 - blend_weight) * implied_h + blend_weight * model_prob_h, 0.05, 0.95)
+    ai_prob_home = np.clip(0.85 * implied_h + 0.15 * model_prob_h, 0.05, 0.95)
     ai_prob_away = 1.0 - ai_prob_home
     
     edge_home = (ai_prob_home * odds_home) - 1.0
@@ -384,71 +221,40 @@ for m in raw_matches:
     
     b = best_odds - 1.0
     kelly_f = (b * best_prob - (1.0 - best_prob)) / b if b > 0 else 0
-    stake = max(0, bankroll * kelly_f * kelly_fraction)
+    stake = max(10, bankroll * kelly_f * kelly_fraction)
     
-    if best_edge >= min_edge_slider and db_conn:
-        cursor.execute("SELECT id FROM ncaa_bets WHERE id = %s", (match_id,))
-        if not cursor.fetchone():
-            cursor.execute(
-                """
-                INSERT INTO ncaa_bets (id, date, match_name, odds, ai_prob, edge, stake, status, profit, home_team, away_team, best_pick)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO NOTHING;
-                """,
-                (match_id, datetime.now().strftime("%Y-%m-%d"), match_name, round(best_odds, 2), best_prob, best_edge, stake, 'Oczekujący', 0.0, m['home'], m['away'], best_pick)
-            )
-            db_conn.commit()
+    if best_edge >= min_edge_slider:
+        if cursor:
+            cursor.execute("SELECT id FROM ncaa_bets WHERE id = %s", (match_id,))
+            if not cursor.fetchone():
+                cursor.execute(
+                    """
+                    INSERT INTO ncaa_bets (id, date, match_name, odds, ai_prob, edge, stake, status, profit, home_team, away_team, best_pick)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO NOTHING;
+                    """,
+                    (match_id, datetime.now().strftime("%Y-%m-%d"), match_name, round(best_odds, 2), best_prob, best_edge, stake, 'Oczekujący', 0.0, m['home'], m['away'], best_pick)
+                )
+                db_conn.commit()
 
         analyzed_matches.append({
             **m, "best_pick": best_pick, "ai_prob": best_prob, "odds": round(best_odds, 2), 
             "edge": best_edge, "stake": round(stake, 2), "rat_diff": round(rat_h - rat_a, 1)
         })
 
-    # Analiza Handicapów (Spreads)
-    for sp in m.get('spreads', []):
-        team = sp['team']
-        line = sp['point'] # np. +7.5 lub -3.5
-        price = sp['price']
-        
-        # Oczekiwany spread z power ratings
-        is_home = (team == m['home'])
-        model_expected_margin = expected_margin if is_home else -expected_margin
-        spread_edge = (model_expected_margin + line) / 15.0 # Szacowanie przewagi linii
-        
-        if spread_edge >= min_edge_slider and price >= 1.70:
-            sp_id = f"{match_id}_{team}_spread"
-            sp_stake = max(0, bankroll * 0.02 * kelly_fraction)
-            
-            if db_conn:
-                cursor.execute("SELECT id FROM ncaa_spread_bets WHERE id = %s", (sp_id,))
-                if not cursor.fetchone():
-                    cursor.execute(
-                        """
-                        INSERT INTO ncaa_spread_bets (id, date, match_name, spread_line, odds, edge, stake, status, profit, best_pick)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (id) DO NOTHING;
-                        """,
-                        (sp_id, datetime.now().strftime("%Y-%m-%d"), match_name, line, price, spread_edge, sp_stake, 'Oczekujący', 0.0, f"{team} ({line:+g})")
-                    )
-                    db_conn.commit()
-            
-            analyzed_spreads.append({
-                "match": match_name, "team": team, "line": line, "odds": price, "edge": spread_edge, "stake": round(sp_stake, 2)
-            })
-
-if db_conn:
+if cursor:
     cursor.close()
 
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v5.0 (Neon + ML)")
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 Sygnały Value H2H", "🎯 Handicapy (Spreads)", "📈 Statystyki & ROI", "🛡️ Panel Diagnostyczny", "📁 Rejestr w Chmurze"])
+st.markdown("## 🏈 College Football Quant Dashboard v5.3 (Pure API)")
+tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value H2H", "🛡️ Diagnostyka API", "📁 Rejestr w Chmurze"])
 
 with tab1:
-    st.subheader("Terminal Analityczny: Najbliższe Spotkania H2H (96h)")
+    st.subheader("Terminal Analityczny (Czyste Dane z API)")
     if not analyzed_matches:
-        st.warning("Brak nadchodzących spotkań H2H spełniających kryteria Edge.")
+        st.warning("Brak meczów z API spełniających kryteria Edge. Sprawdź zakładkę 'Diagnostyka API', aby zweryfikować stan danych dostarczanych przez serwer.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
@@ -457,7 +263,7 @@ with tab1:
                 st.markdown(f"""
                     <div class="value-card">
                         <h3>{m['home']} vs {m['away']} <span class="badge-power">⚡ Diff: {m["rat_diff"]:+} pkt</span></h3>
-                        <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Najbliższe godziny')}</p>
+                        <p style="color: #94a3b8; font-size: 12px;">Start: {m.get('commence_time', 'Brak')}</p>
                         <p>🎯 <b>Typ AI:</b> <span style="color: #60a5fa;">{m['best_pick']}</span> (Kurs: {m['odds']:.2f})</p>
                         <p>🔥 <b>Edge:</b> <span style="color: #3b82f6;">+{edge_pct}%</span> | 💰 <b>Stawka Kellego:</b> {m['stake']} PLN</p>
                     </div>
@@ -466,79 +272,20 @@ with tab1:
                 st.divider()
 
 with tab2:
-    st.subheader("🎯 Dedykowana Zakładka na Atrakcyjne Handicapy (Spread Betting)")
-    if not analyzed_spreads:
-        st.info("Brak optymalnych handicapów spełniających warunki modelu w wyznaczonym oknie.")
-    else:
-        for sp in analyzed_spreads:
-            st.markdown(f"""
-                <div class="value-card">
-                    <h3>{sp['match']}</h3>
-                    <p>🎯 <b>Rekomendowany Handicap:</b> <span style="color: #60a5fa;">{sp['team']} ({sp['line']:+g})</span></p>
-                    <p>📊 <b>Kurs:</b> {sp['odds']:.2f} | 🔥 <b>Model Edge:</b> +{round(sp['edge']*100, 1)}% | 💰 <b>Stawka:</b> {sp['stake']} PLN</p>
-                </div>
-            """, unsafe_allow_html=True)
-            st.divider()
-
-with tab3:
-    st.subheader("📈 Analiza Skuteczności & Krzywa Kapitału (Equity Curve)")
-    if db_conn:
-        df_stats = pd.read_sql("SELECT * FROM ncaa_bets WHERE status != 'Oczekujący'", db_conn)
-    else:
-        df_stats = pd.DataFrame()
-    
-    if df_stats.empty:
-        st.info("Brak rozliczonych zakładów w bazie Neon. Zostaną rozliczone automatycznie po zakończeniu meczów.")
-    else:
-        total_bets = len(df_stats)
-        won_bets = len(df_stats[df_stats['status'] == 'Wygrany'])
-        win_rate = (won_bets / total_bets) * 100 if total_bets > 0 else 0
-        total_profit = df_stats['profit'].sum()
-        total_staked = df_stats['stake'].sum()
-        roi = (total_profit / total_staked) * 100 if total_staked > 0 else 0
-        
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Rozliczone", total_bets)
-        col2.metric("Win Rate", f"{win_rate:.1f}%")
-        col3.metric("Zysk", f"{total_profit:.2f} PLN", delta=f"{total_profit:.2f}")
-        col4.metric("ROI", f"{roi:.2f}%", delta=f"{roi:.2f}%")
-        
-        st.markdown("---")
-        df_stats['cumulative_profit'] = df_stats['profit'].cumsum()
-        df_stats['Kapitał (PLN)'] = bankroll + df_stats['cumulative_profit']
-        st.line_chart(df_stats['Kapitał (PLN)'])
-
-with tab4:
-    st.subheader("🛡️ Panel Diagnostyczny Chmury & Uczenia Maszynowego")
-    if db_conn:
-        df_all = pd.read_sql("SELECT * FROM ncaa_bets", db_conn)
-        total_sig = len(df_all)
-        pending_sig = len(df_all[df_all['status'] == 'Oczekujący'])
-    else:
-        total_sig, pending_sig = 0, 0
-        
-    col_d1, col_d2, col_d3 = st.columns(3)
-    col_d1.metric("Wszystkie Sygnały w Neon", total_sig)
-    col_d2.metric("Oczekujące", pending_sig)
-    col_d3.metric("Status Chmury", "✅ Połączono")
-    
-    st.markdown("---")
-    st.markdown("""
+    st.subheader("🛡️ Diagnostyka Połączenia z The Odds API")
+    st.markdown(f"""
         <div class="test-box">
-        <b>[Neon Cloud DB]:</b> Aktywna i zabezpieczona przed resetami.<br>
-        <b>[ML Feedback Loop]:</b> Dynamiczna kalibracja wag Power Ratings i Home Field Advantage.<br>
-        <b>[Spread Engine]:</b> Aktywna analiza handicapów punktowych.
+        <b>[API Status Code]:</b> {api_status}<br>
+        <b>[Liczba surowych obiektów z API]:</b> {raw_count}<br>
+        <b>[Przetworzone mecze z kursami]:</b> {len(raw_matches)}<br>
+        <b>[Sygnały po filtrze Edge]:</b> {len(analyzed_matches)}<br><br>
+        <i>System pracuje wyłącznie na autentycznych danych rynkowych z podanego klucza API i chmury Neon.</i>
         </div>
     """, unsafe_allow_html=True)
 
-with tab5:
-    st.subheader("📁 Pełny Rejestr Zakładów w Chmurze Neon")
+with tab3:
+    st.subheader("📁 Rejestr Bazy Danych w Chmurze")
     if db_conn:
         df_bets = pd.read_sql("SELECT * FROM ncaa_bets", db_conn)
         st.dataframe(df_bets, use_container_width=True)
-        
-        st.markdown("### Power Ratings drużyn (Uczone przez AI)")
-        df_rat = pd.read_sql("SELECT * FROM team_power_ratings ORDER BY rating DESC", db_conn)
-        st.dataframe(df_rat, use_container_width=True)
-    else:
-        st.error("Brak połączenia z bazą Neon.")
+    
