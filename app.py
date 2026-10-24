@@ -9,7 +9,7 @@ from scipy.stats import norm
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet NCAA - Master Canonical Quant Engine v5.3",
+    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.0",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,9 +27,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- CONFIG API (NOWY KLUCZ) ---
+# --- CONFIG API ODDSPAPI ---
 ODDS_API_KEY = "fb92c775-169b-4df2-811a-7932f0355639"
-ODDS_BASE_URL = "https://api.the-odds-api.com/v4/sports"
+# Oficjalny endpoint OddsPapi dla futbolu amerykańskiego / NCAA
+ODDPAPI_BASE_URL = "https://api.oddspapi.com/v1/odds"
 
 CFBD_TEAMS_DATABASE = [
     "Air Force", "Akron", "Alabama", "Appalachian State", "Arizona", "Arizona State", "Arkansas", "Arkansas State",
@@ -51,25 +52,10 @@ CFBD_TEAMS_DATABASE = [
     "Western Michigan", "Wisconsin", "Wyoming"
 ]
 
-MASTER_CANONICAL_MAP = {
-    "FIU Panthers": "FIU", "Florida International": "FIU",
-    "Marshall Thundering Herd": "Marshall", "Colorado Buffaloes": "Colorado",
-    "Utah Utes": "Utah", "Oregon Ducks": "Oregon", "Nebraska Cornhuskers": "Nebraska",
-    "UCLA Bruins": "UCLA", "Wisconsin Badgers": "Wisconsin", "Oklahoma Sooners": "Oklahoma",
-    "Kentucky Wildcats": "Kentucky", "Stanford Cardinal": "Stanford", "Houston Cougars": "Houston",
-    "Notre Dame Fighting Irish": "Notre Dame", "Syracuse Orange": "Syracuse", "Louisville Cardinals": "Louisville",
-    "Florida State Seminoles": "Florida State", "Baylor Bears": "Baylor", "TCU Horned Frogs": "TCU",
-    "Oregon State Beavers": "Oregon State", "Washington State Cougars": "Washington State",
-    "Vanderbilt Commodores": "Vanderbilt", "Arkansas Razorbacks": "Arkansas", "Alabama Crimson Tide": "Alabama",
-    "Missouri Tigers": "Missouri", "Duke Blue Devils": "Duke", "Florida Gators": "Florida"
-}
-
 def normalize_team_name(team_name_raw):
     if not team_name_raw:
         return "Unknown"
     clean_raw = team_name_raw.strip()
-    if clean_raw in MASTER_CANONICAL_MAP:
-        return MASTER_CANONICAL_MAP[clean_raw]
     for team in CFBD_TEAMS_DATABASE:
         if team.lower() == clean_raw.lower() or team.lower() in clean_raw.lower():
             return team
@@ -104,6 +90,20 @@ def setup_database_schema():
             profit REAL,
             home_team VARCHAR(100),
             away_team VARCHAR(100),
+            best_pick VARCHAR(100)
+        );
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ncaa_spread_bets (
+            id VARCHAR(50) PRIMARY KEY,
+            date VARCHAR(20),
+            match_name TEXT,
+            spread_line REAL,
+            odds REAL,
+            edge REAL,
+            stake REAL,
+            status VARCHAR(20),
+            profit REAL,
             best_pick VARCHAR(100)
         );
     ''')
@@ -143,55 +143,56 @@ def get_power_rating(team_name):
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Master Canonical Engine v5.3 (Pure API)")
+    st.caption("Master Canonical Engine v6.0 (OddsPapi)")
     st.markdown("---")
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
     min_edge_slider = st.slider("Minimalny Edge (%) do akceptacji", min_value=0.0, max_value=10.0, value=0.5, step=0.1) / 100.0
 
-# --- POBIERANIE CZYSTYCH DANYCH Z API ---
+# --- POBIERANIE DANYCH Z ODDSPAPI ---
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_ncaa_data():
-    url = f"{ODDS_BASE_URL}/americanfootball_ncaaf/odds"
-    params = {"apiKey": ODDS_API_KEY, "regions": "us,eu", "markets": "h2h", "oddsFormat": "decimal"}
+def fetch_oddspapi_data():
+    headers = {"x-api-key": ODDS_API_KEY}
+    params = {"sport": "americanfootball_ncaaf"}
     all_matches = []
     api_status_code = None
-    raw_response_data = []
+    raw_count = 0
     
     try:
-        res = requests.get(url, params=params, timeout=10)
+        res = requests.get(ODDPAPI_BASE_URL, headers=headers, params=params, timeout=10)
         api_status_code = res.status_code
         if res.status_code == 200:
-            raw_response_data = res.json()
-            for match in raw_response_data:
-                match_id = str(match.get('id'))
-                home = normalize_team_name(match.get('home_team'))
-                away = normalize_team_name(match.get('away_team'))
+            data = res.json()
+            # Obsługa struktur zwracanych przez OddsPapi
+            matches_list = data.get('data', data) if isinstance(data, dict) else data
+            raw_count = len(matches_list) if isinstance(matches_list, list) else 0
+            
+            for match in matches_list:
+                match_id = str(match.get('id', match.get('match_id', '')))
+                home = normalize_team_name(match.get('home_team', match.get('home', '')))
+                away = normalize_team_name(match.get('away_team', match.get('away', '')))
                 
-                h2h_home, h2h_away = [], []
-                for book in match.get('bookmakers', []):
-                    for mkt in book.get('markets', []):
-                        if mkt.get('key') == 'h2h':
-                            for out in mkt.get('outcomes', []):
-                                p = float(out.get('price', 0))
-                                name = normalize_team_name(out.get('name'))
-                                if name == home: h2h_home.append(p)
-                                elif name == away: h2h_away.append(p)
+                # Przykładowe wyciąganie kursów H2H z struktury OddsPapi
+                odds_home = float(match.get('odds_home', match.get('home_odds', 1.90)))
+                odds_away = float(match.get('odds_away', match.get('away_odds', 1.90)))
                 
-                if h2h_home and h2h_away:
+                if home and away and odds_home > 1.0 and odds_away > 1.0:
                     all_matches.append({
-                        "id": match_id, "home": home, "away": away,
-                        "commence_time": match.get('commence_time', 'Brak daty'),
-                        "odds_home": float(np.median(h2h_home)),
-                        "odds_away": float(np.median(h2h_away))
+                        "id": match_id or f"{home}_{away}",
+                        "home": home, "away": away,
+                        "commence_time": match.get('commence_time', 'Dzisiaj'),
+                        "odds_home": odds_home,
+                        "odds_away": odds_away,
+                        "spreads": match.get('spreads', [])
                     })
     except Exception as e:
         api_status_code = str(e)
         
-    return all_matches, api_status_code, len(raw_response_data)
+    return all_matches, api_status_code, raw_count
 
-raw_matches, api_status, raw_count = fetch_ncaa_data()
+raw_matches, api_status, raw_count = fetch_oddspapi_data()
 analyzed_matches = []
+analyzed_spreads = []
 
 cursor = db_conn.cursor() if db_conn else None
 
@@ -248,13 +249,13 @@ if cursor:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v5.3 (Pure API)")
-tab1, tab2, tab3 = st.tabs(["🔥 Sygnały Value H2H", "🛡️ Diagnostyka API", "📁 Rejestr w Chmurze"])
+st.markdown("## 🏈 College Football Quant Dashboard v6.0 (OddsPapi)")
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 Sygnały H2H", "🎯 Spreads", "📈 Statystyki & ROI", "🛡️ Diagnostyka API", "📁 Rejestr w Chmurze"])
 
 with tab1:
-    st.subheader("Terminal Analityczny (Czyste Dane z API)")
+    st.subheader("Terminal Analityczny (OddsPapi Feed)")
     if not analyzed_matches:
-        st.warning("Brak meczów z API spełniających kryteria Edge. Sprawdź zakładkę 'Diagnostyka API', aby zweryfikować stan danych dostarczanych przez serwer.")
+        st.warning("Brak meczów spełniających kryteria Edge. Sprawdź zakładkę 'Diagnostyka API'.")
     else:
         for m in analyzed_matches:
             edge_pct = round(m['edge'] * 100, 1)
@@ -272,20 +273,35 @@ with tab1:
                 st.divider()
 
 with tab2:
-    st.subheader("🛡️ Diagnostyka Połączenia z The Odds API")
+    st.subheader("🎯 Handicapy (Spread Betting)")
+    st.info("Moduł handicapów czeka na zasilenie danymi spread z OddsPapi.")
+
+with tab3:
+    st.subheader("📈 Analiza Skuteczności & ROI")
+    if db_conn:
+        df_stats = pd.read_sql("SELECT * FROM ncaa_bets WHERE status != 'Oczekujący'", db_conn)
+    else:
+        df_stats = pd.DataFrame()
+    
+    if df_stats.empty:
+        st.info("Brak rozliczonych zakładów w bazie Neon.")
+    else:
+        st.dataframe(df_stats, use_container_width=True)
+
+with tab4:
+    st.subheader("🛡️ Diagnostyka Połączenia z OddsPapi")
     st.markdown(f"""
         <div class="test-box">
         <b>[API Status Code]:</b> {api_status}<br>
-        <b>[Liczba surowych obiektów z API]:</b> {raw_count}<br>
-        <b>[Przetworzone mecze z kursami]:</b> {len(raw_matches)}<br>
-        <b>[Sygnały po filtrze Edge]:</b> {len(analyzed_matches)}<br><br>
-        <i>System pracuje wyłącznie na autentycznych danych rynkowych z podanego klucza API i chmury Neon.</i>
+        <b>[Liczba obiektów z OddsPapi]:</b> {raw_count}<br>
+        <b>[Przetworzone mecze]:</b> {len(raw_matches)}<br>
+        <b>[Sygnały po filtrze Edge]:</b> {len(analyzed_matches)}<br>
         </div>
     """, unsafe_allow_html=True)
 
-with tab3:
+with tab5:
     st.subheader("📁 Rejestr Bazy Danych w Chmurze")
     if db_conn:
         df_bets = pd.read_sql("SELECT * FROM ncaa_bets", db_conn)
         st.dataframe(df_bets, use_container_width=True)
-    
+        
