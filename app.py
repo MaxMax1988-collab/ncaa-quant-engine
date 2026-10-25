@@ -8,7 +8,7 @@ from scipy.stats import norm
 
 # --- KONFIGURACJA STRONY ---
 st.set_page_config(
-    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.6",
+    page_title="Maksbet NCAA - Master Canonical Quant Engine v6.7",
     page_icon="🏈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -151,7 +151,7 @@ def get_power_rating(team_name):
 # --- PANEL BOCZNY ---
 with st.sidebar:
     st.markdown("### 🏈 Maksbet NCAA Quant")
-    st.caption("Master Canonical Engine v6.6")
+    st.caption("Master Canonical Engine v6.7")
     st.markdown("---")
     bankroll = st.number_input("Kapitał początkowy (PLN)", min_value=100, value=1000, step=100)
     kelly_fraction = st.selectbox("Strategia Kellego", [0.1, 0.25, 0.5], index=1, format_func=lambda x: f"{int(x*100)}% Kellego")
@@ -278,11 +278,12 @@ for m in raw_matches:
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (id) DO NOTHING;
                         """,
-                        (match_id, datetime.now(timezone.utc).strftime("%Y-%m-%d"), match_name, round(best_odds, 2), best_prob, best_edge, stake, 'Oczekujący', 0.0, m['home'], m['away'], best_pick)
+                        (str(match_id), datetime.now(timezone.utc).strftime("%Y-%m-%d"), match_name, float(round(best_odds, 2)), float(best_prob), float(best_edge), float(stake), 'Oczekujący', 0.0, str(m['home']), str(m['away']), str(best_pick))
                     )
                     conn_insert.commit()
-            except Exception:
+            except Exception as db_err:
                 conn_insert.rollback()
+                st.error(f"Błąd zapisu do bazy dla {match_name}: {db_err}")
 
         analyzed_matches.append({
             **m, "best_pick": best_pick, "ai_prob": best_prob, "odds": round(best_odds, 2), 
@@ -297,7 +298,7 @@ if conn_insert:
 analyzed_matches.sort(key=lambda x: x['edge'], reverse=True)
 
 # --- INTERFEJS GŁÓWNY ---
-st.markdown("## 🏈 College Football Quant Dashboard v6.6 (Official OddsPapi)")
+st.markdown("## 🏈 College Football Quant Dashboard v6.7")
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 Sygnały H2H", "🎯 Spreads", "📈 Statystyki & ROI", "🛡️ Diagnostyka API", "📁 Rejestr w Chmurze"])
 
 with tab1:
@@ -366,3 +367,4 @@ with tab5:
             st.error(f"Błąd odczytu rejestru: {e}")
     else:
         st.warning("Brak połączenia z bazą danych.")
+    
